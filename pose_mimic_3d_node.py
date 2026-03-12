@@ -264,14 +264,13 @@ class PoseMimic3DNode:
         if a_l_roll is None or a_r_roll is None:
             return None
 
-        # Left arm:  ~30°(down/adducted) → 830,  -90°(horizontal) → ~500,  -180°(up) → 170
-        # Right arm: ~-30°(down/adducted) → 170,  +90°(horizontal) → ~500,  +180°(up) → 830
-        # Note: arms at rest are ~30° due to body width, so use 60 margin
-        a_l_roll = clamp(a_l_roll, -180, 60)
-        a_r_roll = clamp(a_r_roll, -60, 180)
+        # Use full servo range (0-1000 = 240°), don't over-clamp
+        # Servo 15 (l): 小→抬起, 大→放下. Servo 16 (r): 小→放下, 大→抬起
+        a_l_roll = clamp(a_l_roll, -180, 180)
+        a_r_roll = clamp(a_r_roll, -180, 180)
 
-        p_l_sho_roll = int(clamp(val_map(a_l_roll, 60, -180, 830, 170), 125, 875))
-        p_r_sho_roll = int(clamp(val_map(a_r_roll, -60, 180, 170, 830), 125, 875))
+        p_l_sho_roll = int(clamp(val_map(a_l_roll, 90, -180, 875, 125), 0, 1000))
+        p_r_sho_roll = int(clamp(val_map(a_r_roll, -90, 180, 125, 875), 0, 1000))
 
         # ============================================================
         # sho_pitch (ID 13/14): forward/backward arm swing
@@ -283,16 +282,15 @@ class PoseMimic3DNode:
         l_pitch_z = l_upper[2]  # positive = forward
         r_pitch_z = r_upper[2]
 
-        # Wider Z range for more responsive pitch control
-        l_pitch_z = clamp(l_pitch_z, -0.35, 0.35)
-        r_pitch_z = clamp(r_pitch_z, -0.35, 0.35)
+        # Use full range, Z of upper arm ~±0.30m
+        l_pitch_z = clamp(l_pitch_z, -0.30, 0.30)
+        r_pitch_z = clamp(r_pitch_z, -0.30, 0.30)
 
         # Servo 13: 值越大→往后, 值越小→往前
         # Servo 14: 值越小→往后
-        # Z > 0 = toward camera = forward
-        # Flip direction from previous attempt (user said "opposed")
-        p_l_sho_pitch = int(clamp(val_map(l_pitch_z, -0.35, 0.35, 165, 875), 125, 875))
-        p_r_sho_pitch = int(clamp(val_map(r_pitch_z, -0.35, 0.35, 835, 125), 125, 875))
+        # Full 0-1000 range
+        p_l_sho_pitch = int(clamp(val_map(l_pitch_z, -0.30, 0.30, 125, 875), 0, 1000))
+        p_r_sho_pitch = int(clamp(val_map(r_pitch_z, -0.30, 0.30, 875, 125), 0, 1000))
 
         # ============================================================
         # IMPORTANT: YAML names are SWAPPED for elbow servos!
@@ -324,11 +322,10 @@ class PoseMimic3DNode:
         a_l_elb = clamp(a_l_elb, 0, 180)
         a_r_elb = clamp(a_r_elb, 0, 180)
 
-        # Servo 19 (l): 实测 530≈伸直, 越小越弯
-        # MediaPipe实际肘角范围约60-180°, 用这个范围映射
-        p_l_el_yaw = int(clamp(val_map(a_l_elb, 60, 180, 150, 530), 125, 875))
-        # Servo 20 (r): 实测 450≈伸直, 越大越弯
-        p_r_el_yaw = int(clamp(val_map(a_r_elb, 60, 180, 850, 450), 125, 875))
+        # Servo 19 (l): 越小越弯, 530≈伸直, full range
+        # Servo 20 (r): 越大越弯, 450≈伸直, full range
+        p_l_el_yaw = int(clamp(val_map(a_l_elb, 30, 180, 125, 875), 0, 1000))
+        p_r_el_yaw = int(clamp(val_map(a_r_elb, 30, 180, 875, 125), 0, 1000))
 
         # ============================================================
         # gripper (ID 21/22): held at stand

@@ -258,8 +258,9 @@ class PoseMimic3DNode:
         a_r_roll = clamp(a_r_roll, -90, 90)
 
         # SAME mapping for both — exactly like 2D node and TonyPi
-        p_l_sho_roll = int(clamp(val_map(a_l_roll, -90, 90, 170, 830), 0, 1000))
-        p_r_sho_roll = int(clamp(val_map(a_r_roll, -90, 90, 170, 830), 0, 1000))
+        # Safe range 125-875
+        p_l_sho_roll = int(clamp(val_map(a_l_roll, -90, 90, 170, 830), 125, 875))
+        p_r_sho_roll = int(clamp(val_map(a_r_roll, -90, 90, 170, 830), 125, 875))
 
         # Extract world landmarks for pitch and elbow
         l_sho = np.array([world_lm[11].x, world_lm[11].y, world_lm[11].z])
@@ -288,9 +289,9 @@ class PoseMimic3DNode:
 
         # Servo 13: 值越大→往后, 值越小→往前
         # Servo 14: 值越小→往后
-        # Full 0-1000 range
-        p_l_sho_pitch = int(clamp(val_map(l_pitch_z, -0.30, 0.30, 125, 875), 0, 1000))
-        p_r_sho_pitch = int(clamp(val_map(r_pitch_z, -0.30, 0.30, 875, 125), 0, 1000))
+        # Safe range 125-875 to protect servos
+        p_l_sho_pitch = int(clamp(val_map(l_pitch_z, -0.30, 0.30, 125, 875), 125, 875))
+        p_r_sho_pitch = int(clamp(val_map(r_pitch_z, -0.30, 0.30, 875, 125), 125, 875))
 
         # ============================================================
         # IMPORTANT: YAML names are SWAPPED for elbow servos!
@@ -322,10 +323,10 @@ class PoseMimic3DNode:
         a_l_elb = clamp(a_l_elb, 0, 180)
         a_r_elb = clamp(a_r_elb, 0, 180)
 
-        # Servo 19 (l): 越小越弯, 530≈伸直, full range
-        # Servo 20 (r): 越大越弯, 450≈伸直, full range
-        p_l_el_yaw = int(clamp(val_map(a_l_elb, 30, 180, 125, 875), 0, 1000))
-        p_r_el_yaw = int(clamp(val_map(a_r_elb, 30, 180, 875, 125), 0, 1000))
+        # Servo 19 (l): 越小越弯, 530≈伸直. Safe: 150-640
+        # Servo 20 (r): 越大越弯, 450≈伸直. Safe: 360-850
+        p_l_el_yaw = int(clamp(val_map(a_l_elb, 30, 180, 150, 640), 150, 640))
+        p_r_el_yaw = int(clamp(val_map(a_r_elb, 30, 180, 850, 360), 360, 850))
 
         # ============================================================
         # gripper (ID 21/22): held at stand

@@ -223,13 +223,46 @@ class PoseMimic3DNode:
     # ------------------------------------------------------------------
     # 3D angle extraction using world coordinates
     # ------------------------------------------------------------------
-    def compute_all_arm_pulses(self, world_lm):
-        """Compute pulses using world coordinates (meters, hip-centered).
-        World coords: X=right, Y=up, Z=toward camera (MediaPipe convention).
+    def compute_all_arm_pulses(self, world_lm, norm_lm):
+        """Compute pulses using:
+        - Screen (normalized) coords for sho_roll (lateral raise — proven reliable in 2D)
+        - World coords for sho_pitch (forward/backward — needs Z) and elbow
 
         Returns dict of {joint_name: pulse} or None."""
 
-        # Extract world landmarks
+        # ============================================================
+        # sho_roll (ID 15/16): lateral arm raise — USE SCREEN COORDS
+        # ============================================================
+        # Same approach as the working 2D pose_mimic_node.py
+        # Servo 15 (l): 小→抬起, 大→放下. stand=830
+        # Servo 16 (r): 小→放下, 大→抬起. stand=170
+        l_sho_n = norm_lm[11]
+        r_sho_n = norm_lm[12]
+        l_elb_n = norm_lm[13]
+        r_elb_n = norm_lm[14]
+
+        # In flipped image (Y increases downward in screen coords):
+        # dx = elbow.x - shoulder.x, dy = elbow.y - shoulder.y
+        # atan2(dx, dy) gives angle from downward vertical
+        # Arms down: dx≈0, dy>0 → angle≈0°
+        # Arms horizontal: dx large, dy≈0 → angle≈±90°
+        l_dx = l_elb_n.x - l_sho_n.x
+        l_dy = l_elb_n.y - l_sho_n.y
+        r_dx = r_elb_n.x - r_sho_n.x
+        r_dy = r_elb_n.y - r_sho_n.y
+
+        a_l_roll = math.degrees(math.atan2(l_dx, l_dy))  # negative = raised left
+        a_r_roll = math.degrees(math.atan2(r_dx, r_dy))  # positive = raised right
+
+        a_l_roll = clamp(a_l_roll, -180, 30)
+        a_r_roll = clamp(a_r_roll, -30, 180)
+
+        # Left: 0°(down)→830, -90°(horizontal)→500, -180°(up)→170
+        # Right: 0°(down)→170, +90°(horizontal)→500, +180°(up)→830
+        p_l_sho_roll = int(clamp(val_map(a_l_roll, 30, -180, 875, 125), 0, 1000))
+        p_r_sho_roll = int(clamp(val_map(a_r_roll, -30, 180, 125, 875), 0, 1000))
+
+        # Extract world landmarks for pitch and elbow
         l_sho = np.array([world_lm[11].x, world_lm[11].y, world_lm[11].z])
         r_sho = np.array([world_lm[12].x, world_lm[12].y, world_lm[12].z])
         l_elb = np.array([world_lm[13].x, world_lm[13].y, world_lm[13].z])
@@ -237,41 +270,8 @@ class PoseMimic3DNode:
         l_wri = np.array([world_lm[15].x, world_lm[15].y, world_lm[15].z])
         r_wri = np.array([world_lm[16].x, world_lm[16].y, world_lm[16].z])
 
-        # ============================================================
-        # sho_roll (ID 15/16): lateral arm raise
-        # ============================================================
-        # Project shoulder→elbow onto the frontal plane (XY), measure angle from vertical
-        # In flipped image world coords:
-        #   Left arm (landmark 11 side) raises to -X → angle goes NEGATIVE
-        #   Right arm (landmark 12 side) raises to +X → angle goes POSITIVE
-        #
-        # Servo 15 (l_sho_roll): 值越小→靠近头部(抬起), 值越大→贴近躯干(放下)
-        #   stand=830(放下)
-        # Servo 16 (r_sho_roll): 值越小→贴近躯干(放下), 值越大→靠近头部(抬起)
-        #   stand=170(放下)
-
-        l_upper = l_elb - l_sho  # shoulder to elbow vector
+        l_upper = l_elb - l_sho
         r_upper = r_elb - r_sho
-
-        down = np.array([0, 1])  # Y-down in MediaPipe world coords
-
-        l_roll_2d = np.array([l_upper[0], l_upper[1]])  # XY projection
-        r_roll_2d = np.array([r_upper[0], r_upper[1]])
-
-        # With Y-down: arms down=0°, left raised=+90°~+180°, right raised=-90°~-180°
-        a_l_roll = signed_angle_2d(down, l_roll_2d)
-        a_r_roll = signed_angle_2d(down, r_roll_2d)
-
-        if a_l_roll is None or a_r_roll is None:
-            return None
-
-        a_l_roll = clamp(a_l_roll, -30, 180)
-        a_r_roll = clamp(a_r_roll, -180, 30)
-
-        # Servo 15 (l): 小→抬起, 大→放下. 0°(down)→830, 180°(up)→170
-        # Servo 16 (r): 小→放下, 大→抬起. 0°(down)→170, -180°(up)→830
-        p_l_sho_roll = int(clamp(val_map(a_l_roll, -30, 180, 875, 125), 0, 1000))
-        p_r_sho_roll = int(clamp(val_map(a_r_roll, 30, -180, 125, 875), 0, 1000))
 
         # ============================================================
         # sho_pitch (ID 13/14): forward/backward arm swing
@@ -435,7 +435,7 @@ class PoseMimic3DNode:
                     cv2.putText(bgr_image, 'STANDING (uncross to resume)', (10, 30),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
                 else:
-                    pulses = self.compute_all_arm_pulses(world_lm)
+                    pulses = self.compute_all_arm_pulses(world_lm, norm_lm)
                     if pulses is not None:
                         self.pulse_window.append(pulses)
                         self.frame_count += 1

@@ -253,24 +253,25 @@ class PoseMimic3DNode:
         l_upper = l_elb - l_sho  # shoulder to elbow vector
         r_upper = r_elb - r_sho
 
-        down = np.array([0, -1])  # downward in world Y
+        down = np.array([0, 1])  # Y-down in MediaPipe world coords
 
         l_roll_2d = np.array([l_upper[0], l_upper[1]])  # XY projection
         r_roll_2d = np.array([r_upper[0], r_upper[1]])
 
+        # With Y-down: arms down=0°, left raised=+90°~+180°, right raised=-90°~-180°
         a_l_roll = signed_angle_2d(down, l_roll_2d)
         a_r_roll = signed_angle_2d(down, r_roll_2d)
 
         if a_l_roll is None or a_r_roll is None:
             return None
 
-        # Use full servo range (0-1000 = 240°), don't over-clamp
-        # Servo 15 (l): 小→抬起, 大→放下. Servo 16 (r): 小→放下, 大→抬起
-        a_l_roll = clamp(a_l_roll, -180, 180)
-        a_r_roll = clamp(a_r_roll, -180, 180)
+        a_l_roll = clamp(a_l_roll, -30, 180)
+        a_r_roll = clamp(a_r_roll, -180, 30)
 
-        p_l_sho_roll = int(clamp(val_map(a_l_roll, 90, -180, 875, 125), 0, 1000))
-        p_r_sho_roll = int(clamp(val_map(a_r_roll, -90, 180, 125, 875), 0, 1000))
+        # Servo 15 (l): 小→抬起, 大→放下. 0°(down)→830, 180°(up)→170
+        # Servo 16 (r): 小→放下, 大→抬起. 0°(down)→170, -180°(up)→830
+        p_l_sho_roll = int(clamp(val_map(a_l_roll, -30, 180, 875, 125), 0, 1000))
+        p_r_sho_roll = int(clamp(val_map(a_r_roll, 30, -180, 125, 875), 0, 1000))
 
         # ============================================================
         # sho_pitch (ID 13/14): forward/backward arm swing

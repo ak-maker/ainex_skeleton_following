@@ -223,7 +223,7 @@ class PoseMimic3DNode:
     # ------------------------------------------------------------------
     # 3D angle extraction using world coordinates
     # ------------------------------------------------------------------
-    def compute_all_arm_pulses(self, world_lm, norm_lm):
+    def compute_all_arm_pulses(self, world_lm, norm_lm, width, height):
         """Compute pulses using:
         - Screen (normalized) coords for sho_roll (lateral raise — proven reliable in 2D)
         - World coords for sho_pitch (forward/backward — needs Z) and elbow
@@ -231,36 +231,35 @@ class PoseMimic3DNode:
         Returns dict of {joint_name: pulse} or None."""
 
         # ============================================================
-        # sho_roll (ID 15/16): lateral arm raise — USE SCREEN COORDS
+        # sho_roll (ID 15/16): lateral arm raise — EXACT SAME as working 2D node
         # ============================================================
-        # Same approach as the working 2D pose_mimic_node.py
-        # Servo 15 (l): 小→抬起, 大→放下. stand=830
-        # Servo 16 (r): 小→放下, 大→抬起. stand=170
-        l_sho_n = norm_lm[11]
-        r_sho_n = norm_lm[12]
-        l_elb_n = norm_lm[13]
-        r_elb_n = norm_lm[14]
+        # Use screen pixel coords with vector_2d_angle from horizontal reference
+        # Both sides use IDENTICAL mapping: val_map(angle, -90, 90, 170, 830)
+        # Opposite-sign angles naturally handle mirroring
+        l_sho_px = [norm_lm[11].x * width, norm_lm[11].y * height]
+        r_sho_px = [norm_lm[12].x * width, norm_lm[12].y * height]
+        l_elb_px = [norm_lm[13].x * width, norm_lm[13].y * height]
+        r_elb_px = [norm_lm[14].x * width, norm_lm[14].y * height]
 
-        # In flipped image (Y increases downward in screen coords):
-        # dx = elbow.x - shoulder.x, dy = elbow.y - shoulder.y
-        # atan2(dx, dy) gives angle from downward vertical
-        # Arms down: dx≈0, dy>0 → angle≈0°
-        # Arms horizontal: dx large, dy≈0 → angle≈±90°
-        l_dx = l_elb_n.x - l_sho_n.x
-        l_dy = l_elb_n.y - l_sho_n.y
-        r_dx = r_elb_n.x - r_sho_n.x
-        r_dy = r_elb_n.y - r_sho_n.y
+        l_ref = [width, l_sho_px[1]]
+        r_ref = [0, r_sho_px[1]]
 
-        a_l_roll = math.degrees(math.atan2(l_dx, l_dy))  # negative = raised left
-        a_r_roll = math.degrees(math.atan2(r_dx, r_dy))  # positive = raised right
+        a_l_roll = signed_angle_2d(
+            np.array(l_sho_px) - np.array(l_ref),
+            np.array(l_sho_px) - np.array(l_elb_px))
+        a_r_roll = signed_angle_2d(
+            np.array(r_sho_px) - np.array(r_ref),
+            np.array(r_sho_px) - np.array(r_elb_px))
 
-        a_l_roll = clamp(a_l_roll, -180, 30)
-        a_r_roll = clamp(a_r_roll, -30, 180)
+        if a_l_roll is None or a_r_roll is None:
+            return None
 
-        # Left: 0°(down)→830, -90°(horizontal)→500, -180°(up)→170
-        # Right: 0°(down)→170, +90°(horizontal)→500, +180°(up)→830
-        p_l_sho_roll = int(clamp(val_map(a_l_roll, 30, -180, 875, 125), 0, 1000))
-        p_r_sho_roll = int(clamp(val_map(a_r_roll, -30, 180, 125, 875), 0, 1000))
+        a_l_roll = clamp(a_l_roll, -90, 90)
+        a_r_roll = clamp(a_r_roll, -90, 90)
+
+        # SAME mapping for both — exactly like 2D node and TonyPi
+        p_l_sho_roll = int(clamp(val_map(a_l_roll, -90, 90, 170, 830), 0, 1000))
+        p_r_sho_roll = int(clamp(val_map(a_r_roll, -90, 90, 170, 830), 0, 1000))
 
         # Extract world landmarks for pitch and elbow
         l_sho = np.array([world_lm[11].x, world_lm[11].y, world_lm[11].z])
@@ -435,7 +434,7 @@ class PoseMimic3DNode:
                     cv2.putText(bgr_image, 'STANDING (uncross to resume)', (10, 30),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
                 else:
-                    pulses = self.compute_all_arm_pulses(world_lm, norm_lm)
+                    pulses = self.compute_all_arm_pulses(world_lm, norm_lm, width, height)
                     if pulses is not None:
                         self.pulse_window.append(pulses)
                         self.frame_count += 1

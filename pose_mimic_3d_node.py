@@ -264,13 +264,14 @@ class PoseMimic3DNode:
         if a_l_roll is None or a_r_roll is None:
             return None
 
-        # Left arm:  0°(down) → 830,  -90°(horizontal) → ~500,  -180°(up) → 170
-        # Right arm: 0°(down) → 170,  +90°(horizontal) → ~500,  +180°(up) → 830
-        a_l_roll = clamp(a_l_roll, -180, 30)   # left arm: negative when raised
-        a_r_roll = clamp(a_r_roll, -30, 180)   # right arm: positive when raised
+        # Left arm:  ~30°(down/adducted) → 830,  -90°(horizontal) → ~500,  -180°(up) → 170
+        # Right arm: ~-30°(down/adducted) → 170,  +90°(horizontal) → ~500,  +180°(up) → 830
+        # Note: arms at rest are ~30° due to body width, so use 60 margin
+        a_l_roll = clamp(a_l_roll, -180, 60)
+        a_r_roll = clamp(a_r_roll, -60, 180)
 
-        p_l_sho_roll = int(clamp(val_map(a_l_roll, 30, -180, 830, 170), 125, 875))
-        p_r_sho_roll = int(clamp(val_map(a_r_roll, -30, 180, 170, 830), 125, 875))
+        p_l_sho_roll = int(clamp(val_map(a_l_roll, 60, -180, 830, 170), 125, 875))
+        p_r_sho_roll = int(clamp(val_map(a_r_roll, -60, 180, 170, 830), 125, 875))
 
         # ============================================================
         # sho_pitch (ID 13/14): forward/backward arm swing
@@ -282,14 +283,16 @@ class PoseMimic3DNode:
         l_pitch_z = l_upper[2]  # positive = forward
         r_pitch_z = r_upper[2]
 
-        # Normalize to a usable range. Upper arm length ~0.25m, so Z range is roughly ±0.25
-        l_pitch_z = clamp(l_pitch_z, -0.25, 0.25)
-        r_pitch_z = clamp(r_pitch_z, -0.25, 0.25)
+        # Wider Z range for more responsive pitch control
+        l_pitch_z = clamp(l_pitch_z, -0.35, 0.35)
+        r_pitch_z = clamp(r_pitch_z, -0.35, 0.35)
 
-        # l_sho_pitch: stand=835, reversed servo. Forward → decrease pulse, backward → increase
-        p_l_sho_pitch = int(clamp(val_map(l_pitch_z, -0.25, 0.25, 875, 165), 125, 875))
-        # r_sho_pitch: stand=165, reversed servo. Forward → increase pulse, backward → decrease
-        p_r_sho_pitch = int(clamp(val_map(r_pitch_z, -0.25, 0.25, 125, 835), 125, 875))
+        # Servo 13: 值越大→往后, 值越小→往前
+        # Servo 14: 值越小→往后
+        # Z > 0 = toward camera = forward
+        # Flip direction from previous attempt (user said "opposed")
+        p_l_sho_pitch = int(clamp(val_map(l_pitch_z, -0.35, 0.35, 165, 875), 125, 875))
+        p_r_sho_pitch = int(clamp(val_map(r_pitch_z, -0.35, 0.35, 835, 125), 125, 875))
 
         # ============================================================
         # IMPORTANT: YAML names are SWAPPED for elbow servos!
@@ -302,17 +305,11 @@ class PoseMimic3DNode:
 
         # --- Servo 17/18 (yaml: el_pitch, ACTUAL: forearm rotation) ---
         # 小臂绕大臂旋转，不影响大小臂距离
-        # 值小→逆时针(面对机器人), 值大→顺时针
-        # Use Z component of forearm relative to upper arm for rotation estimate
-        l_rot_z = l_forearm[2] - l_upper[2]
-        r_rot_z = r_forearm[2] - r_upper[2]
-
-        l_rot_z = clamp(l_rot_z, -0.20, 0.20)
-        r_rot_z = clamp(r_rot_z, -0.20, 0.20)
-
-        # Stand: l_el_pitch=500, r_el_pitch=500
-        p_l_el_pitch = int(clamp(val_map(l_rot_z, -0.20, 0.20, 125, 875), 125, 875))
-        p_r_el_pitch = int(clamp(val_map(r_rot_z, -0.20, 0.20, 875, 125), 125, 875))
+        # MediaPipe无法可靠检测前臂绕轴旋转，固定在stand值
+        p_l_el_pitch = STAND_PULSE['l_el_pitch']  # 500
+        p_r_el_pitch = STAND_PULSE['r_el_pitch']  # 500
+        l_rot_z = 0.0  # placeholder for debug
+        r_rot_z = 0.0
 
         # --- Servo 19/20 (yaml: el_yaw, ACTUAL: elbow bend) ---
         # 转动影响大小臂距离
@@ -327,12 +324,11 @@ class PoseMimic3DNode:
         a_l_elb = clamp(a_l_elb, 0, 180)
         a_r_elb = clamp(a_r_elb, 0, 180)
 
-        # Servo 19 (l): 180°(伸直)→530, 0°(完全弯曲)→150
-        # 实测: 530≈伸直, 最大640, 越小越弯
-        p_l_el_yaw = int(clamp(val_map(a_l_elb, 0, 180, 150, 530), 125, 875))
-        # Servo 20 (r): 180°(伸直)→450, 0°(完全弯曲)→850
-        # 实测: 450≈伸直, 最低360, 越大越弯
-        p_r_el_yaw = int(clamp(val_map(a_r_elb, 0, 180, 850, 450), 125, 875))
+        # Servo 19 (l): 实测 530≈伸直, 越小越弯
+        # MediaPipe实际肘角范围约60-180°, 用这个范围映射
+        p_l_el_yaw = int(clamp(val_map(a_l_elb, 60, 180, 150, 530), 125, 875))
+        # Servo 20 (r): 实测 450≈伸直, 越大越弯
+        p_r_el_yaw = int(clamp(val_map(a_r_elb, 60, 180, 850, 450), 125, 875))
 
         # ============================================================
         # gripper (ID 21/22): held at stand

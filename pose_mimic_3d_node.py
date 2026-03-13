@@ -410,8 +410,8 @@ class PoseMimic3DNode:
         # 1000 units = 240°, so 180° elbow range = 750 units.
         # Servo 19: straight(180°)=530, so bent(0°)=530-750=-220 → clip to 0
         # Servo 20: straight(180°)=450, so bent(0°)=450+750=1200 → clip to 1000
-        p_l_el_yaw = int(clamp(val_map(a_l_elb, 0, 180, 530 - 750, 530), 0, 600))
-        p_r_el_yaw = int(clamp(val_map(a_r_elb, 0, 180, 450 + 750, 450), 400, 1000))
+        p_l_el_yaw = int(clamp(val_map(a_l_elb, 0, 180, 530 - 750, 530), 125, 875))
+        p_r_el_yaw = int(clamp(val_map(a_r_elb, 0, 180, 450 + 750, 450), 125, 875))
 
         # ============================================================
         # gripper (ID 21/22): held at stand

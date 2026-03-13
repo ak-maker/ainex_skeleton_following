@@ -404,12 +404,12 @@ class PoseMimic3DNode:
         a_l_elb = clamp(a_l_elb, 0, 180)
         a_r_elb = clamp(a_r_elb, 0, 180)
 
-        # Servo 19 (l): 越小越弯, 530≈伸直. Safe: 150-640 (user-tested)
-        # Servo 20 (r): 越大越弯, 450≈伸直. Safe: 360-850 (user-tested)
+        # Servo 19 (l): 越小越弯, 530≈伸直. Hardware safe: 0-600
+        # Servo 20 (r): 越大越弯, 450≈伸直. Hardware safe: 400-1000
         # IMPORTANT: servo 20 was burned by sending 202 (below min 360).
-        # These clamp ranges are HARDWARE LIMITS — do NOT widen them.
-        p_l_el_yaw = int(clamp(val_map(a_l_elb, 30, 180, 150, 640), 150, 640))
-        p_r_el_yaw = int(clamp(val_map(a_r_elb, 30, 180, 850, 360), 360, 850))
+        # Mapping uses full 0-1000 conceptual range, then clip to safe limits.
+        p_l_el_yaw = int(clamp(val_map(a_l_elb, 0, 180, 0, 1000), 0, 600))
+        p_r_el_yaw = int(clamp(val_map(a_r_elb, 0, 180, 1000, 0), 400, 1000))
 
         # ============================================================
         # gripper (ID 21/22): held at stand

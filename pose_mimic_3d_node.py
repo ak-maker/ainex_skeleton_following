@@ -410,7 +410,7 @@ class PoseMimic3DNode:
         # Elbow angle: 0°=fully bent, 180°=straight
         # Servo 19: bent(0°)→125, straight(180°)→875
         # Servo 20: bent(0°)→875, straight(180°)→125
-        p_l_el_yaw = int(clamp(val_map(a_l_elb, 0, 180, 125, 875), 125, 875))
+        p_l_el_yaw = int(clamp(val_map(a_l_elb, 0, 180, 125, 875), 0, 875))
         p_r_el_yaw = int(clamp(val_map(a_r_elb, 0, 180, 875, 125), 125, 875))
 
         # ============================================================

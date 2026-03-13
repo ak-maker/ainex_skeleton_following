@@ -407,9 +407,11 @@ class PoseMimic3DNode:
         # Servo 19 (l): 越小越弯, 530≈伸直. Hardware safe: 0-600
         # Servo 20 (r): 越大越弯, 450≈伸直. Hardware safe: 400-1000
         # IMPORTANT: servo 20 was burned by sending 202 (below min 360).
-        # Mapping uses full 0-1000 conceptual range, then clip to safe limits.
-        p_l_el_yaw = int(clamp(val_map(a_l_elb, 0, 180, 0, 1000), 0, 600))
-        p_r_el_yaw = int(clamp(val_map(a_r_elb, 0, 180, 1000, 0), 400, 1000))
+        # 1000 units = 240°, so 180° elbow range = 750 units.
+        # Servo 19: straight(180°)=530, so bent(0°)=530-750=-220 → clip to 0
+        # Servo 20: straight(180°)=450, so bent(0°)=450+750=1200 → clip to 1000
+        p_l_el_yaw = int(clamp(val_map(a_l_elb, 0, 180, 530 - 750, 530), 0, 600))
+        p_r_el_yaw = int(clamp(val_map(a_r_elb, 0, 180, 450 + 750, 450), 400, 1000))
 
         # ============================================================
         # gripper (ID 21/22): held at stand

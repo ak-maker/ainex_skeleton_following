@@ -43,8 +43,8 @@ bash -c 'source /opt/ros/noetic/setup.bash && source /home/ubuntu/ros_ws/devel/s
 | 16 | r_sho_roll | Right shoulder lateral raise | small=down, big=raised | 170 |
 | 17 | l_el_pitch | **Actually** left forearm rotation | small=CCW, big=CW | 500 |
 | 18 | r_el_pitch | **Actually** right forearm rotation | small=CCW, big=CW | 500 |
-| 19 | l_el_yaw | **Actually** left elbow bend | small=bent, 530=straight | 150 |
-| 20 | r_el_yaw | **Actually** right elbow bend | big=bent, 450=straight | 850 |
+| 19 | l_el_yaw | **Actually** left elbow bend | small=bent, 600=straight, range 0-600 | 150 |
+| 20 | r_el_yaw | **Actually** right elbow bend | big=bent, 450=straight, range 360-850 (BURNED) | 850 |
 | 21 | l_gripper | Left gripper | — | 500 |
 | 22 | r_gripper | Right gripper | — | 500 |
 
@@ -53,8 +53,29 @@ bash -c 'source /opt/ros/noetic/setup.bash && source /home/ubuntu/ros_ws/devel/s
 ### Servo Unit System
 
 - 0-1000 pulse units = 240 degrees of servo rotation
-- 125-875 = 750 units = 180 degrees (used for 1:1 angle mapping, same as TonyPi)
+- 125-875 = 750 units = 180 degrees (TonyPi's 1:1 angle mapping: 4.17 units/degree)
 - Left and right servos are mirror-mounted, so same physical movement requires opposite pulse directions
+
+### Elbow Mapping (why NOT TonyPi 125-875)
+
+TonyPi uses 125-875 = 750 units = 180° for a clean 1:1 mapping. This works when the servo's full useful range (straight to fully bent) fits within 125-875. However:
+
+- **Servo 19 (left elbow bend)**: physical straight position is at **600**, not 875. Range is **0-600**.
+  - If we used TonyPi mapping (125-875), straight(180°) would map to 875 — far beyond the physical limit of 600.
+  - Correct mapping: 0°(bent)→0, 180°(straight)→600.
+  - Actual servo rotation: 600 units × 0.24°/unit = **144° of servo rotation** for 180° elbow angle.
+  - So the ratio is 0.8° servo rotation per 1° elbow angle (not 1:1).
+- **Servo 20 (right elbow bend)**: physical straight at **450**, range **360-850** (BURNED, held at stand).
+  - Similar issue: TonyPi's 125 would be below the physical minimum of 360.
+
+**Lesson**: TonyPi's 125-875 mapping is an ideal that assumes all servos have symmetric, centered ranges. Real servos may have asymmetric physical limits. Always map to the **actual physical range** (bent position → straight position) rather than forcing a theoretical mapping.
+
+### Unit conversion reference
+
+- 1 unit = 0.24° (240° / 1000 units)
+- 1° = ~4.17 units (1000 / 240)
+- TonyPi range: 750 units × 0.24° = 180° servo rotation → 1:1 with 180° joint angle
+- Servo 19 range: 600 units × 0.24° = 144° servo rotation → 0.8:1 with 180° elbow angle
 
 ## MediaPipe Coordinate Systems
 
@@ -84,6 +105,7 @@ Detailed in `pose_mimic_3d_node.py` header comments. Summary:
 5. **World Y-axis assumed up** — actually Y-down, caused 180-degree angle offset.
 6. **Landmark 11/12 identity confusion** — docs say person's left/right, but with flipped image the mapping reverses.
 7. **World coordinate axes undocumented** — Google docs don't clearly specify X/Y/Z directions. Determined empirically: X=left, Y=down, Z=camera lens direction.
+8. **Elbow mapping used TonyPi 125-875 blindly** — Servo 19's straight position is at 600, not 875. Mapping 180°→875 would command the servo far past its physical limit. Must map to actual physical range (0-600), not theoretical TonyPi range.
 
 ## Anti-Twitch
 

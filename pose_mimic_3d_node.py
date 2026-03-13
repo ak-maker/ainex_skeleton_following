@@ -91,6 +91,15 @@
 #    Google's documentation does NOT clearly specify axis directions(!),
 #    confirmed via GitHub issue #3370. The above was determined empirically
 #    and from user knowledge.
+#
+# 8. ELBOW MAPPING USED TonyPi 125-875 BLINDLY
+#    Applied val_map(angle, 0, 180, 125, 875) to elbow servos, assuming all
+#    servos fit the TonyPi 125-875 = 180° mapping. But servo 19's physical
+#    straight position is at 600, NOT 875. Sending 875 would exceed its
+#    physical limit. Servo 19's actual range is 0 (fully bent) to 600
+#    (straight). Must map to real physical range: val_map(angle, 0, 180, 0, 600).
+#    LESSON: TonyPi mapping is an ideal. Real servos have asymmetric limits.
+#    Always check the actual physical range before applying any mapping formula.
 # ============================================================
 
 import os
@@ -404,13 +413,19 @@ class PoseMimic3DNode:
         a_l_elb = clamp(a_l_elb, 0, 180)
         a_r_elb = clamp(a_r_elb, 0, 180)
 
-        # Servo 19 (l): 越小越弯, 530≈伸直
-        # Servo 20 (r): 越大越弯, 450≈伸直
-        # TonyPi approach: 125-875 = 750 units = 180° (1000 units = 240°), 1:1 mapping.
+        # Servo 19 (l): 越小越弯, 600≈伸直, 物理范围0-600
+        # Servo 20 (r): 越大越弯, 450≈伸直, 物理范围360-850 (BURNED)
+        #
+        # NOTE: Servo 19 cannot use TonyPi 125-875 mapping because its physical
+        # straight position is at 600, not 875. The full range 0-600 covers
+        # bent(0) to straight(600), so we map directly to this physical range.
+        # 600 units × 0.24°/unit = 144° servo rotation for 180° elbow angle.
+        # (TonyPi: 750 units × 0.24° = 180° servo = 1:1 with joint angle)
+        #
         # Elbow angle: 0°=fully bent, 180°=straight
-        # Servo 19: bent(0°)→125, straight(180°)→875
-        # Servo 20: bent(0°)→875, straight(180°)→125
-        p_l_el_yaw = int(clamp(val_map(a_l_elb, 0, 180, 125, 875), 0, 875))
+        # Servo 19: bent(0°)→0, straight(180°)→600
+        # Servo 20: bent(0°)→850, straight(180°)→360 (BURNED, held at stand)
+        p_l_el_yaw = int(clamp(val_map(a_l_elb, 0, 180, 0, 600), 0, 600))
         p_r_el_yaw = int(clamp(val_map(a_r_elb, 0, 180, 875, 125), 125, 875))
 
         # ============================================================

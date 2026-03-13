@@ -287,11 +287,10 @@ class PoseMimic3DNode:
         l_pitch_z = clamp(l_pitch_z, -0.30, 0.30)
         r_pitch_z = clamp(r_pitch_z, -0.30, 0.30)
 
-        # Servo 13: 值越大→往后, 值越小→往前
-        # Servo 14: 值越小→往后
-        # Safe range 125-875 to protect servos
-        p_l_sho_pitch = int(clamp(val_map(l_pitch_z, -0.30, 0.30, 125, 875), 125, 875))
-        p_r_sho_pitch = int(clamp(val_map(r_pitch_z, -0.30, 0.30, 875, 125), 125, 875))
+        # Servo 13: 值越大→往后, 值越小→往前. Z>0=forward→小, Z<0=backward→大
+        # Servo 14: 值越小→往后. Z>0=forward→大, Z<0=backward→小
+        p_l_sho_pitch = int(clamp(val_map(l_pitch_z, -0.30, 0.30, 875, 125), 125, 875))
+        p_r_sho_pitch = int(clamp(val_map(r_pitch_z, -0.30, 0.30, 125, 875), 125, 875))
 
         # ============================================================
         # IMPORTANT: YAML names are SWAPPED for elbow servos!

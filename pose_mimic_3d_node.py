@@ -6,15 +6,67 @@
 # temporal smoothing. World coordinates (meters, hip-centered) for
 # accurate 3D arm angles — needed for Warrior II and similar poses.
 #
-# Controls all arm servos (ID 13-22):
-#   - sho_pitch (13/14): 3D forward/backward via world Z
-#   - sho_roll  (15/16): 3D lateral raise via world coords
-#   - el_pitch  (17/18): 3D elbow bend via world coords
-#   - el_yaw    (19/20): 3D forearm rotation via world coords
+# Controls arm servos (ID 13-22):
+#   - sho_pitch (13/14): forward/backward via world Z component
+#   - sho_roll  (15/16): lateral raise via 2D screen coords (NOT world coords)
+#   - el_pitch  (17/18): YAML says pitch but ACTUALLY forearm rotation (held at stand)
+#   - el_yaw    (19/20): YAML says yaw but ACTUALLY elbow bend
 #   - gripper   (21/22): held at stand (hand detection unreliable)
+#   - servo 20:          BURNED — held at stand until replaced
 #
 # Crossed-arms gesture to return to standing position.
 # Sliding window smoothing on top of MediaPipe's temporal smoothing.
+#
+# ============================================================
+# MISTAKES LOG — lessons learned during development
+# ============================================================
+#
+# 1. BURNED SERVO 20 (r_el_yaw, actual elbow bend)
+#    Root cause: used clamp range 0-1000 (full theoretical range) instead of
+#    the user-tested safe range 360-850. Code sent pulse values as low as 202
+#    to servo 20, whose physical minimum is 360. This caused the servo to stall
+#    against its mechanical stop, overheat, and burn out.
+#    47 out of 788 commands were below 250, 131 were in the danger zone.
+#    Fix: always use user-tested safe ranges (servo 19: 150-640, servo 20: 360-850).
+#    LESSON: NEVER trust theoretical 0-1000 range. Physical limits are tighter.
+#    A limited range of motion is always better than a destroyed servo.
+#
+# 2. sho_pitch (13/14) DIRECTION FLIPPED MULTIPLE TIMES
+#    Root cause: confused about two things simultaneously:
+#    (a) MediaPipe world Z direction (Z > 0 = toward camera = forward)
+#    (b) Servo pulse direction for each side (13: big=back, 14: small=back)
+#    The left and right servos are mirror-mounted, so the SAME physical
+#    movement (arm forward) requires OPPOSITE pulse directions (13 goes small,
+#    14 goes big). I kept flipping the mapping trying to fix one side and
+#    breaking the other. Should have checked user's servos.txt from the start.
+#    Fix: servo 13 forward=small backward=big; servo 14 forward=big backward=small.
+#
+# 3. YAML NAMES FOR ELBOW SERVOS ARE WRONG
+#    Servo 17/18: YAML calls them "el_pitch" but they actually control forearm
+#    ROTATION (spinning around the upper arm axis, doesn't change elbow angle).
+#    Servo 19/20: YAML calls them "el_yaw" but they actually control elbow
+#    BEND (changes distance between forearm and upper arm).
+#    I initially mapped bend angles to 17/18 and rotation to 19/20 — backwards.
+#    The user's servos.txt observations were the key to identifying this swap.
+#
+# 4. sho_roll (15/16) WORLD COORDINATES DON'T WORK
+#    Tried 3 different approaches with world coords for lateral arm raise:
+#    (a) Y-up assumption — wrong, MediaPipe world Y is actually downward
+#    (b) Y-down fix — angles still stuck at clamp boundaries when arms move
+#    (c) atan2(dx, dy) on normalized coords — also didn't track arm spreading
+#    Root cause: world coordinate XY projection is unreliable for lateral arm
+#    raise detection on a single 2D camera. The depth estimation adds noise.
+#    Fix: copied the EXACT approach from the working 2D node (pose_mimic_node.py)
+#    which uses vector_2d_angle with a horizontal reference point. Both sides use
+#    the IDENTICAL mapping val_map(angle, -90, 90, 170, 830) — the opposite-sign
+#    angles from the flipped image naturally handle left/right mirroring.
+#
+# 5. MediaPipe world Y-axis direction
+#    Assumed Y-up (like OpenGL). Actually MediaPipe world landmarks use Y-down
+#    (same convention as image coordinates). This caused the "down" reference
+#    vector [0, -1] to point UP, making all roll angles off by ~180 degrees.
+#    Arms hanging down showed angles of ~170° instead of ~0°.
+# ============================================================
 
 import os
 import cv2

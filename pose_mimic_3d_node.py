@@ -404,14 +404,14 @@ class PoseMimic3DNode:
         a_l_elb = clamp(a_l_elb, 0, 180)
         a_r_elb = clamp(a_r_elb, 0, 180)
 
-        # Servo 19 (l): 越小越弯, 530≈伸直. Hardware safe: 0-600
-        # Servo 20 (r): 越大越弯, 450≈伸直. Hardware safe: 400-1000
-        # IMPORTANT: servo 20 was burned by sending 202 (below min 360).
-        # 1000 units = 240°, so 180° elbow range = 750 units.
-        # Servo 19: straight(180°)=530, so bent(0°)=530-750=-220 → clip to 0
-        # Servo 20: straight(180°)=450, so bent(0°)=450+750=1200 → clip to 1000
-        p_l_el_yaw = int(clamp(val_map(a_l_elb, 0, 180, 530 - 750, 530), 125, 875))
-        p_r_el_yaw = int(clamp(val_map(a_r_elb, 0, 180, 450 + 750, 450), 125, 875))
+        # Servo 19 (l): 越小越弯, 530≈伸直
+        # Servo 20 (r): 越大越弯, 450≈伸直
+        # TonyPi approach: 125-875 = 750 units = 180° (1000 units = 240°), 1:1 mapping.
+        # Elbow angle: 0°=fully bent, 180°=straight
+        # Servo 19: bent(0°)→125, straight(180°)→875
+        # Servo 20: bent(0°)→875, straight(180°)→125
+        p_l_el_yaw = int(clamp(val_map(a_l_elb, 0, 180, 125, 875), 125, 875))
+        p_r_el_yaw = int(clamp(val_map(a_r_elb, 0, 180, 875, 125), 125, 875))
 
         # ============================================================
         # gripper (ID 21/22): held at stand

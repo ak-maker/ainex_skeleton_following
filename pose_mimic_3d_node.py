@@ -33,7 +33,10 @@
 #
 # 2. sho_pitch (13/14) DIRECTION FLIPPED MULTIPLE TIMES
 #    Root cause: confused about two things simultaneously:
-#    (a) MediaPipe world Z direction (Z > 0 = toward camera = forward)
+#    (a) MediaPipe world Z direction — Z follows camera lens direction (away
+#        from camera into the scene). With origin at hip center and person
+#        facing camera: Z > 0 = toward person's BACK, Z < 0 = FORWARD.
+#        I wrongly assumed Z > 0 = toward camera = forward.
 #    (b) Servo pulse direction for each side (13: big=back, 14: small=back)
 #    The left and right servos are mirror-mounted, so the SAME physical
 #    movement (arm forward) requires OPPOSITE pulse directions (13 goes small,
@@ -66,6 +69,28 @@
 #    (same convention as image coordinates). This caused the "down" reference
 #    vector [0, -1] to point UP, making all roll angles off by ~180 degrees.
 #    Arms hanging down showed angles of ~170° instead of ~0°.
+#
+# 6. LANDMARK 11/12 IDENTITY CONFUSION
+#    MediaPipe docs: landmark 11 = person's LEFT shoulder, 12 = person's RIGHT.
+#    This is ALWAYS from the person's own anatomical perspective, per the docs.
+#    However, we flip the image (cv2.flip) before feeding to MediaPipe for
+#    mirror effect. MediaPipe doesn't know the image is flipped — it just
+#    detects what it sees. So in the flipped image, your actual right arm
+#    appears as a left arm, and MediaPipe labels it landmark 11.
+#    Result: landmark 11 in our code = person's REAL right side (due to flip).
+#    We map landmark 11 → robot LEFT servos, giving correct mirror behavior.
+#    The code logic is correct but many comments wrongly stated landmark 11
+#    is the person's left shoulder — that's only true for unflipped images.
+#
+# 7. WORLD COORDINATE SYSTEM (corrected understanding)
+#    Origin: center of hips (moves with person)
+#    X = person's LEFT direction (positive = left)
+#    Y = DOWN (positive = downward)
+#    Z = camera lens direction (positive = away from camera, into the scene)
+#    When person faces camera: Z > 0 = toward person's back, Z < 0 = forward
+#    Google's documentation does NOT clearly specify axis directions(!),
+#    confirmed via GitHub issue #3370. The above was determined empirically
+#    and from user knowledge.
 # ============================================================
 
 import os
@@ -328,21 +353,26 @@ class PoseMimic3DNode:
         # ============================================================
         # sho_pitch (ID 13/14): forward/backward arm swing
         # ============================================================
-        # Use Z component of upper arm vector (forward/backward)
-        # Z > 0 = toward camera = arm forward, Z < 0 = away = arm backward
-        # (MediaPipe world: Z points toward camera)
+        # World Z follows camera lens direction (away from camera).
+        # With origin at hip center, person facing camera:
+        #   Z > 0 = toward person's BACK (arm backward)
+        #   Z < 0 = toward camera = arm FORWARD
+        #
+        # Note: landmark 11 → servo 13 (robot left), landmark 12 → servo 14 (robot right)
+        # Due to image flip, landmark 11 = person's actual RIGHT side.
 
-        l_pitch_z = l_upper[2]  # positive = forward
+        l_pitch_z = l_upper[2]  # positive = backward, negative = forward
         r_pitch_z = r_upper[2]
 
-        # Use full range, Z of upper arm ~±0.30m
         l_pitch_z = clamp(l_pitch_z, -0.30, 0.30)
         r_pitch_z = clamp(r_pitch_z, -0.30, 0.30)
 
-        # Servo 13: 值越大→往后, 值越小→往前. Z>0=forward→小, Z<0=backward→大
-        # Servo 14: 值越小→往后. Z>0=forward→大, Z<0=backward→小
-        p_l_sho_pitch = int(clamp(val_map(l_pitch_z, -0.30, 0.30, 875, 125), 125, 875))
-        p_r_sho_pitch = int(clamp(val_map(r_pitch_z, -0.30, 0.30, 125, 875), 125, 875))
+        # Servo 13: 值越大→往后, 值越小→往前
+        #   Z>0(back)→大, Z<0(fwd)→小
+        # Servo 14: 值越小→往后
+        #   Z>0(back)→小, Z<0(fwd)→大
+        p_l_sho_pitch = int(clamp(val_map(l_pitch_z, -0.30, 0.30, 125, 875), 125, 875))
+        p_r_sho_pitch = int(clamp(val_map(r_pitch_z, -0.30, 0.30, 875, 125), 125, 875))
 
         # ============================================================
         # IMPORTANT: YAML names are SWAPPED for elbow servos!

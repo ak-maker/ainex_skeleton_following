@@ -419,13 +419,13 @@ class PoseMimic3DNode:
         l_pitch_angle = math.degrees(math.atan2(-l_upper[2], l_upper[1]))
         r_pitch_angle = math.degrees(math.atan2(-r_upper[2], r_upper[1]))
 
-        l_pitch_angle = clamp(l_pitch_angle, -45, 85)
-        r_pitch_angle = clamp(r_pitch_angle, -45, 85)
+        l_pitch_angle = clamp(l_pitch_angle, -45, 170)
+        r_pitch_angle = clamp(r_pitch_angle, -45, 170)
 
-        # Servo 13: backward(-45) -> 950, forward(+85) -> 50
-        # Servo 14: backward(-45) -> 50, forward(+85) -> 950
-        p_l_sho_pitch = int(clamp(val_map(l_pitch_angle, -45, 85, 950, 50), 50, 950))
-        p_r_sho_pitch = int(clamp(val_map(r_pitch_angle, -45, 85, 50, 950), 50, 950))
+        # Servo 13: backward(-45) -> 950, overhead(+170) -> 50
+        # Servo 14: backward(-45) -> 50, overhead(+170) -> 950
+        p_l_sho_pitch = int(clamp(val_map(l_pitch_angle, -45, 170, 950, 50), 50, 950))
+        p_r_sho_pitch = int(clamp(val_map(r_pitch_angle, -45, 170, 50, 950), 50, 950))
 
         # ============================================================
         # IMPORTANT: YAML names are SWAPPED for elbow servos!

@@ -9,10 +9,9 @@
 # Controls arm servos (ID 13-22):
 #   - sho_pitch (13/14): forward/backward via world Z component
 #   - sho_roll  (15/16): lateral raise via 2D screen coords (NOT world coords)
-#   - el_pitch  (17/18): YAML says pitch but ACTUALLY forearm rotation (held at stand)
+#   - el_pitch  (17/18): YAML says pitch but ACTUALLY forearm rotation (palm normal detection)
 #   - el_yaw    (19/20): YAML says yaw but ACTUALLY elbow bend
 #   - gripper   (21/22): held at stand (hand detection unreliable)
-#   - servo 20:          BURNED — held at stand until replaced
 #
 # Crossed-arms gesture to return to standing position.
 # Sliding window smoothing on top of MediaPipe's temporal smoothing.
@@ -173,10 +172,10 @@ RESUME_FRAMES = 12
 CROSS_DIST_RATIO = 0.8
 
 # --- Anti-twitch ---
-WINDOW_SIZE = 6          # smaller window since VIDEO mode already smooths
-SEND_EVERY = 3           # send more often since smoother input
-MIN_FRAMES_BEFORE_SEND = 3
-DEADZONE_PULSE = 25
+WINDOW_SIZE = 15         # large window for heavy smoothing
+SEND_EVERY = 30          # send every 30 frames = ~3 seconds at 10Hz
+MIN_FRAMES_BEFORE_SEND = 10
+DEADZONE_PULSE = 50      # ignore changes smaller than 50 pulse units
 
 
 def val_map(x, in_min, in_max, out_min, out_max):
@@ -204,6 +203,37 @@ def signed_angle_2d(v1, v2):
     cos_val = np.clip(np.dot(v1, v2) / d, -1.0, 1.0)
     sin_val = np.clip(np.cross(v1, v2) / d, -1.0, 1.0)
     return float(np.degrees(np.arctan2(sin_val, cos_val)))
+
+
+def _compute_forearm_rotation(wri, pinky, index, forearm_vec):
+    """Compute forearm rotation angle from hand landmarks.
+    Returns angle in degrees or None if landmarks are unreliable."""
+    to_pinky = pinky - wri
+    to_index = index - wri
+
+    # Palm normal via cross product
+    palm_normal = np.cross(to_index, to_pinky)
+    norm_len = np.linalg.norm(palm_normal)
+    if norm_len < 1e-6:
+        return None
+    palm_normal = palm_normal / norm_len
+
+    # Forearm direction (normalized)
+    fa_len = np.linalg.norm(forearm_vec)
+    if fa_len < 1e-6:
+        return None
+    fa_dir = forearm_vec / fa_len
+
+    # Project palm normal onto plane perpendicular to forearm
+    palm_perp = palm_normal - np.dot(palm_normal, fa_dir) * fa_dir
+    perp_len = np.linalg.norm(palm_perp)
+    if perp_len < 1e-6:
+        return None
+    palm_perp = palm_perp / perp_len
+
+    # Compute rotation angle using Y and Z components of projected vector
+    rotation_angle = math.degrees(math.atan2(palm_perp[2], palm_perp[1]))
+    return rotation_angle
 
 
 class PoseMimic3DNode:
@@ -286,7 +316,7 @@ class PoseMimic3DNode:
     # Gesture: crossed arms (using normalized screen landmarks)
     # ------------------------------------------------------------------
     def _arms_crossed(self, norm_lm):
-        """Check using normalized (screen) landmarks."""
+        """Check for crossed arms using distance ratio AND wrist order reversal."""
         l_sho = norm_lm[11]
         r_sho = norm_lm[12]
         l_wri = norm_lm[15]
@@ -299,11 +329,21 @@ class PoseMimic3DNode:
             return False
 
         ratio = wri_d / sho_w
-        crossed = ratio < CROSS_DIST_RATIO
+        close_enough = ratio < CROSS_DIST_RATIO  # 0.8
+
+        # Check that wrist left-right order is REVERSED relative to shoulders.
+        # Normal: left wrist on same side as left shoulder (same sign)
+        # Crossed: left wrist crossed to right shoulder side (opposite sign)
+        sho_sign = l_sho.x - r_sho.x
+        wri_sign = l_wri.x - r_wri.x
+        actually_crossed = (sho_sign * wri_sign) < 0
+
+        crossed = close_enough and actually_crossed
 
         if int(time.time()) != getattr(self, '_cross_dbg_t', 0):
             self._cross_dbg_t = int(time.time())
-            print('[Cross] ratio=%.2f -> %s' % (ratio, crossed), flush=True)
+            print('[Cross] ratio=%.2f swapped=%s close=%s -> %s' % (
+                ratio, actually_crossed, close_enough, crossed), flush=True)
         return crossed
 
     # ------------------------------------------------------------------
@@ -320,7 +360,7 @@ class PoseMimic3DNode:
         # sho_roll (ID 15/16): lateral arm raise — EXACT SAME as working 2D node
         # ============================================================
         # Use screen pixel coords with vector_2d_angle from horizontal reference
-        # Both sides use IDENTICAL mapping: val_map(angle, -90, 90, 170, 830)
+        # Sign-mirrored ranges: L(-100,90)→(70,900), R(-90,100)→(100,930)
         # Opposite-sign angles naturally handle mirroring
         l_sho_px = [norm_lm[11].x * width, norm_lm[11].y * height]
         r_sho_px = [norm_lm[12].x * width, norm_lm[12].y * height]
@@ -340,13 +380,13 @@ class PoseMimic3DNode:
         if a_l_roll is None or a_r_roll is None:
             return None
 
-        a_l_roll = clamp(a_l_roll, -90, 90)
-        a_r_roll = clamp(a_r_roll, -90, 90)
+        # Sign-mirrored clamp: left gets extra negative range, right gets extra positive
+        # (same physical movement = opposite sign due to mirrored reference points)
+        a_l_roll = clamp(a_l_roll, -100, 90)
+        a_r_roll = clamp(a_r_roll, -90, 100)
 
-        # SAME mapping for both — exactly like 2D node and TonyPi
-        # Safe range 125-875
-        p_l_sho_roll = int(clamp(val_map(a_l_roll, -90, 90, 170, 830), 125, 875))
-        p_r_sho_roll = int(clamp(val_map(a_r_roll, -90, 90, 170, 830), 125, 875))
+        p_l_sho_roll = int(clamp(val_map(a_l_roll, -100, 90, 70, 900), 70, 900))
+        p_r_sho_roll = int(clamp(val_map(a_r_roll, -90, 100, 100, 930), 100, 930))
 
         # Extract world landmarks for pitch and elbow
         l_sho = np.array([world_lm[11].x, world_lm[11].y, world_lm[11].z])
@@ -362,26 +402,30 @@ class PoseMimic3DNode:
         # ============================================================
         # sho_pitch (ID 13/14): forward/backward arm swing
         # ============================================================
-        # World Z follows camera lens direction (away from camera).
-        # With origin at hip center, person facing camera:
-        #   Z > 0 = toward person's BACK (arm backward)
-        #   Z < 0 = toward camera = arm FORWARD
+        # Compute pitch angle in YZ plane using atan2
+        # MediaPipe world coords: Y=down(+), Z=away from camera(+)
+        # atan2(-Z, Y) gives:
+        #   arm hanging down (Y>0, Z~0)  -> ~0 degrees
+        #   arm forward      (Y~0, Z<0)  -> positive angle (up to +90)
+        #   arm backward     (Y~0, Z>0)  -> negative angle (down to -90)
+        # Using atan2 instead of raw Z makes the result body-size independent
+        # (arm length cancels out because atan2 uses ratio, not absolute value).
         #
-        # Note: landmark 11 → servo 13 (robot left), landmark 12 → servo 14 (robot right)
-        # Due to image flip, landmark 11 = person's actual RIGHT side.
+        # CRITICAL: l_upper[1] and l_upper[2] are components of the VECTOR
+        # (l_elb - l_sho), NOT the landmark coordinates themselves.
+        #
+        # Servo 13 (left): big=back, small=forward
+        # Servo 14 (right): small=back, big=forward (mirror mount)
+        l_pitch_angle = math.degrees(math.atan2(-l_upper[2], l_upper[1]))
+        r_pitch_angle = math.degrees(math.atan2(-r_upper[2], r_upper[1]))
 
-        l_pitch_z = l_upper[2]  # positive = backward, negative = forward
-        r_pitch_z = r_upper[2]
+        l_pitch_angle = clamp(l_pitch_angle, -45, 85)
+        r_pitch_angle = clamp(r_pitch_angle, -45, 85)
 
-        l_pitch_z = clamp(l_pitch_z, -0.30, 0.30)
-        r_pitch_z = clamp(r_pitch_z, -0.30, 0.30)
-
-        # Servo 13: 值越大→往后, 值越小→往前
-        #   Z>0(back)→大, Z<0(fwd)→小
-        # Servo 14: 值越小→往后
-        #   Z>0(back)→小, Z<0(fwd)→大
-        p_l_sho_pitch = int(clamp(val_map(l_pitch_z, -0.30, 0.30, 125, 875), 125, 875))
-        p_r_sho_pitch = int(clamp(val_map(r_pitch_z, -0.30, 0.30, 875, 125), 125, 875))
+        # Servo 13: backward(-45) -> 950, forward(+85) -> 50
+        # Servo 14: backward(-45) -> 50, forward(+85) -> 950
+        p_l_sho_pitch = int(clamp(val_map(l_pitch_angle, -45, 85, 950, 50), 50, 950))
+        p_r_sho_pitch = int(clamp(val_map(r_pitch_angle, -45, 85, 50, 950), 50, 950))
 
         # ============================================================
         # IMPORTANT: YAML names are SWAPPED for elbow servos!
@@ -394,39 +438,61 @@ class PoseMimic3DNode:
 
         # --- Servo 17/18 (yaml: el_pitch, ACTUAL: forearm rotation) ---
         # 小臂绕大臂旋转，不影响大小臂距离
-        # MediaPipe无法可靠检测前臂绕轴旋转，固定在stand值
-        p_l_el_pitch = STAND_PULSE['l_el_pitch']  # 500
-        p_r_el_pitch = STAND_PULSE['r_el_pitch']  # 500
-        l_rot_z = 0.0  # placeholder for debug
-        r_rot_z = 0.0
+        # Use palm normal vector from hand landmarks to estimate forearm rotation.
+        # Landmarks: 15/16 (wrist), 17/18 (pinky), 19/20 (index) — these are
+        # MediaPipe POSE landmark IDs, NOT servo IDs.
+        #
+        # WARNING: Pose Landmarker hand points have LOW accuracy, especially Z.
+        # If too noisy in practice, fall back to fixed stand value (500).
+
+        l_wri_w = np.array([world_lm[15].x, world_lm[15].y, world_lm[15].z])
+        l_pinky_w = np.array([world_lm[17].x, world_lm[17].y, world_lm[17].z])
+        l_index_w = np.array([world_lm[19].x, world_lm[19].y, world_lm[19].z])
+
+        r_wri_w = np.array([world_lm[16].x, world_lm[16].y, world_lm[16].z])
+        r_pinky_w = np.array([world_lm[18].x, world_lm[18].y, world_lm[18].z])
+        r_index_w = np.array([world_lm[20].x, world_lm[20].y, world_lm[20].z])
+
+        l_rot_angle = _compute_forearm_rotation(l_wri_w, l_pinky_w, l_index_w, l_forearm)
+        r_rot_angle = _compute_forearm_rotation(r_wri_w, r_pinky_w, r_index_w, r_forearm)
+
+        # Servo 17 (left): 875 = palm forward, 125 = palm backward (swapped — was crossed)
+        if l_rot_angle is not None:
+            l_rot_angle = clamp(l_rot_angle, -90, 90)
+            p_l_el_pitch = int(clamp(val_map(l_rot_angle, -90, 90, 875, 125), 125, 875))
+        else:
+            p_l_el_pitch = STAND_PULSE['l_el_pitch']  # fallback to 500
+
+        # Servo 18 (right): 875 = palm forward, 125 = palm backward
+        if r_rot_angle is not None:
+            r_rot_angle = clamp(r_rot_angle, -90, 90)
+            p_r_el_pitch = int(clamp(val_map(r_rot_angle, -90, 90, 875, 125), 125, 875))
+        else:
+            p_r_el_pitch = STAND_PULSE['r_el_pitch']  # fallback to 500
+
+        l_rot_z = l_rot_angle if l_rot_angle is not None else 0.0
+        r_rot_z = r_rot_angle if r_rot_angle is not None else 0.0
 
         # --- Servo 19/20 (yaml: el_yaw, ACTUAL: elbow bend) ---
         # 转动影响大小臂距离
-        # Servo 19: 值越小→弯曲, 530≈伸直, 最大640
-        # Servo 20: 值越大→弯曲, 450≈伸直, 最低360
+        # Servo 19: 值越小→弯曲, 600≈伸直, 物理范围50-600
+        # Servo 20: 值越大→弯曲, 450≈伸直, 物理范围400-950
+        #   *** Servo 20 CANNOT go below 360 (burned before). Clamp min = 400 for safety. ***
         a_l_elb = angle_between_vectors_3d(-l_upper, l_forearm)
         a_r_elb = angle_between_vectors_3d(-r_upper, r_forearm)
 
         if a_l_elb is None or a_r_elb is None:
             return None
 
-        a_l_elb = clamp(a_l_elb, 0, 180)
-        a_r_elb = clamp(a_r_elb, 0, 180)
+        # Clamp angle to 60-180: below 60° is extreme bend that servos can't safely reach
+        a_l_elb = clamp(a_l_elb, 60, 180)
+        a_r_elb = clamp(a_r_elb, 60, 180)
 
-        # Servo 19 (l): 越小越弯, 600≈伸直, 物理范围0-600
-        # Servo 20 (r): 越大越弯, 450≈伸直, 物理范围360-850 (BURNED)
-        #
-        # NOTE: Servo 19 cannot use TonyPi 125-875 mapping because its physical
-        # straight position is at 600, not 875. The full range 0-600 covers
-        # bent(0) to straight(600), so we map directly to this physical range.
-        # 600 units × 0.24°/unit = 144° servo rotation for 180° elbow angle.
-        # (TonyPi: 750 units × 0.24° = 180° servo = 1:1 with joint angle)
-        #
-        # Elbow angle: 0°=fully bent, 180°=straight
-        # Servo 19: bent(0°)→0, straight(180°)→600
-        # Servo 20: bent(0°)→850, straight(180°)→360 (BURNED, held at stand)
-        p_l_el_yaw = int(clamp(val_map(a_l_elb, 0, 180, 0, 600), 0, 600))
-        p_r_el_yaw = int(clamp(val_map(a_r_elb, 0, 180, 875, 125), 125, 875))
+        # Elbow angle: 60°=max bend, 180°=straight
+        # Servo 19: bent(60°)→50, straight(180°)→600
+        # Servo 20: bent(60°)→950, straight(180°)→400
+        p_l_el_yaw = int(clamp(val_map(a_l_elb, 60, 180, 50, 600), 50, 600))
+        p_r_el_yaw = int(clamp(val_map(a_r_elb, 60, 180, 950, 400), 400, 950))
 
         # ============================================================
         # gripper (ID 21/22): held at stand
@@ -445,8 +511,8 @@ class PoseMimic3DNode:
         # Debug (once per second)
         if int(time.time()) != getattr(self, '_dbg_t', 0):
             self._dbg_t = int(time.time())
-            print('[3D] roll L=%.0f R=%.0f | pitch_z L=%.3f R=%.3f | elbow_bend L=%.0f R=%.0f | rot_z L=%.3f R=%.3f' % (
-                a_l_roll, a_r_roll, l_pitch_z, r_pitch_z, a_l_elb, a_r_elb, l_rot_z, r_rot_z), flush=True)
+            print('[3D] roll L=%.0f R=%.0f | pitch L=%.1f R=%.1f | elbow L=%.0f R=%.0f | rot L=%.1f R=%.1f' % (
+                a_l_roll, a_r_roll, l_pitch_angle, r_pitch_angle, a_l_elb, a_r_elb, l_rot_z, r_rot_z), flush=True)
 
         return pulses
 

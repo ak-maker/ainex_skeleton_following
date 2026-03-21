@@ -166,10 +166,28 @@ ARM_JOINTS = [
     'l_gripper',   'r_gripper',
 ]
 
+# Leg joints we control (12 servos, 6 per leg)
+LEG_JOINTS = [
+    'l_hip_yaw',   'r_hip_yaw',
+    'l_hip_roll',  'r_hip_roll',
+    'l_hip_pitch', 'r_hip_pitch',
+    'l_knee',      'r_knee',
+    'l_ank_pitch', 'r_ank_pitch',
+    'l_ank_roll',  'r_ank_roll',
+]
+
+ALL_JOINTS = ARM_JOINTS + LEG_JOINTS
+
+# Units per degree (1000 units = 240 degrees)
+UNITS_PER_DEG = 1000.0 / 240.0  # ≈ 4.17
+
+# Leg safety: max offset from stand (±100 units ≈ ±24 degrees)
+LEG_MAX_OFFSET = 100
+
 # --- Gesture ---
 STAND_GESTURE_FRAMES = 5
 RESUME_FRAMES = 12
-CROSS_DIST_RATIO = 0.8
+CROSS_DIST_RATIO = 0.5
 
 # --- Anti-twitch ---
 WINDOW_SIZE = 15         # large window for heavy smoothing
@@ -307,7 +325,7 @@ class PoseMimic3DNode:
 
     def _send_stand(self):
         cmds = [[SERVO_ID[j], STAND_PULSE[j]] for j in SERVO_ID]
-        self.motion_manager.set_servos_position(800, cmds)
+        self.motion_manager.set_servos_position(1600, cmds)
         self.last_pulse.clear()
         self.pulse_window.clear()
         self.frame_count = 0
@@ -315,8 +333,10 @@ class PoseMimic3DNode:
     # ------------------------------------------------------------------
     # Gesture: crossed arms (using normalized screen landmarks)
     # ------------------------------------------------------------------
-    def _arms_crossed(self, norm_lm):
-        """Check for crossed arms using distance ratio AND wrist order reversal."""
+    def _hands_close(self, norm_lm):
+        """Check if hands are close together (wrist distance / shoulder width < threshold).
+        Used for both stand and resume — easier to trigger than crossed arms
+        since MediaPipe is too shaky for reliable cross detection."""
         l_sho = norm_lm[11]
         r_sho = norm_lm[12]
         l_wri = norm_lm[15]
@@ -329,22 +349,12 @@ class PoseMimic3DNode:
             return False
 
         ratio = wri_d / sho_w
-        close_enough = ratio < CROSS_DIST_RATIO  # 0.8
-
-        # Check that wrist left-right order is REVERSED relative to shoulders.
-        # Normal: left wrist on same side as left shoulder (same sign)
-        # Crossed: left wrist crossed to right shoulder side (opposite sign)
-        sho_sign = l_sho.x - r_sho.x
-        wri_sign = l_wri.x - r_wri.x
-        actually_crossed = (sho_sign * wri_sign) < 0
-
-        crossed = close_enough and actually_crossed
+        close = ratio < CROSS_DIST_RATIO  # 0.8
 
         if int(time.time()) != getattr(self, '_cross_dbg_t', 0):
             self._cross_dbg_t = int(time.time())
-            print('[Cross] ratio=%.2f swapped=%s close=%s -> %s' % (
-                ratio, actually_crossed, close_enough, crossed), flush=True)
-        return crossed
+            print('[Hands] ratio=%.2f close=%s' % (ratio, close), flush=True)
+        return close
 
     # ------------------------------------------------------------------
     # 3D angle extraction using world coordinates
@@ -517,17 +527,142 @@ class PoseMimic3DNode:
         return pulses
 
     # ------------------------------------------------------------------
+    # Leg control using MediaPipe landmarks 23-28
+    # ------------------------------------------------------------------
+    def compute_leg_pulses(self, world_lm):
+        """Compute leg servo pulses from MediaPipe world landmarks.
+
+        Landmarks (after image flip):
+          23=left hip, 24=right hip, 25=left knee, 26=right knee,
+          27=left ankle, 28=right ankle.
+        Due to flip: landmark 23 = person's actual RIGHT → robot LEFT leg.
+
+        Controls: hip_pitch, knee, ank_pitch (with stability compensation).
+        Holds at stand: hip_yaw, hip_roll, ank_roll.
+
+        Returns dict of {joint_name: pulse}."""
+
+        l_hip = np.array([world_lm[23].x, world_lm[23].y, world_lm[23].z])
+        r_hip = np.array([world_lm[24].x, world_lm[24].y, world_lm[24].z])
+        l_knee_pt = np.array([world_lm[25].x, world_lm[25].y, world_lm[25].z])
+        r_knee_pt = np.array([world_lm[26].x, world_lm[26].y, world_lm[26].z])
+        l_ankle = np.array([world_lm[27].x, world_lm[27].y, world_lm[27].z])
+        r_ankle = np.array([world_lm[28].x, world_lm[28].y, world_lm[28].z])
+
+        l_upper_leg = l_knee_pt - l_hip    # hip → knee vector
+        r_upper_leg = r_knee_pt - r_hip
+        l_lower_leg = l_ankle - l_knee_pt  # knee → ankle vector
+        r_lower_leg = r_ankle - r_knee_pt
+
+        # ---- Hip pitch: atan2(-Z, Y) of upper leg vector ----
+        # Standing: Y>0(down), Z≈0 → angle≈0
+        # Leg forward: Z<0 → positive angle
+        # Leg backward: Z>0 → negative angle
+        l_hip_angle = math.degrees(math.atan2(-l_upper_leg[2], l_upper_leg[1]))
+        r_hip_angle = math.degrees(math.atan2(-r_upper_leg[2], r_upper_leg[1]))
+
+        l_hip_angle = clamp(l_hip_angle, -20, 40)  # conservative: 20° back, 40° forward
+        r_hip_angle = clamp(r_hip_angle, -20, 40)
+
+        # ---- Knee bend: angle between -upper_leg and lower_leg ----
+        # 180° = straight, smaller = bent
+        a_l_knee = angle_between_vectors_3d(-l_upper_leg, l_lower_leg)
+        a_r_knee = angle_between_vectors_3d(-r_upper_leg, r_lower_leg)
+
+        if a_l_knee is None:
+            a_l_knee = 180.0
+        if a_r_knee is None:
+            a_r_knee = 180.0
+
+        a_l_knee = clamp(a_l_knee, 120, 180)  # max bend 120°, straight 180°
+        a_r_knee = clamp(a_r_knee, 120, 180)
+
+        # ---- Convert to pulse offsets from stand ----
+        # Hip pitch: forward(+) → pulse increases for left, decreases for right
+        # (URDF: l_hip_pitch axis Y, r_hip_pitch axis -Y, mirror mounted)
+        # Stand: l=350, r=650 (sum=1000)
+        l_hip_offset = l_hip_angle * UNITS_PER_DEG
+        r_hip_offset = r_hip_angle * UNITS_PER_DEG
+
+        p_l_hip_pitch = int(clamp(
+            STAND_PULSE['l_hip_pitch'] + l_hip_offset,
+            STAND_PULSE['l_hip_pitch'] - LEG_MAX_OFFSET,
+            STAND_PULSE['l_hip_pitch'] + LEG_MAX_OFFSET))
+        p_r_hip_pitch = int(clamp(
+            STAND_PULSE['r_hip_pitch'] - r_hip_offset,
+            STAND_PULSE['r_hip_pitch'] - LEG_MAX_OFFSET,
+            STAND_PULSE['r_hip_pitch'] + LEG_MAX_OFFSET))
+
+        # Knee: bend(smaller angle) → offset from straight
+        # l_knee axis Y: bend → pulse increases; r_knee axis -Y: bend → pulse decreases
+        # Stand: both 500 (straight)
+        l_knee_offset = (180 - a_l_knee) * UNITS_PER_DEG
+        r_knee_offset = (180 - a_r_knee) * UNITS_PER_DEG
+
+        p_l_knee = int(clamp(
+            STAND_PULSE['l_knee'] + l_knee_offset,
+            STAND_PULSE['l_knee'] - LEG_MAX_OFFSET,
+            STAND_PULSE['l_knee'] + LEG_MAX_OFFSET))
+        p_r_knee = int(clamp(
+            STAND_PULSE['r_knee'] - r_knee_offset,
+            STAND_PULSE['r_knee'] - LEG_MAX_OFFSET,
+            STAND_PULSE['r_knee'] + LEG_MAX_OFFSET))
+
+        # ---- Ankle pitch: stability compensation ----
+        # When hip pitches forward, ankle must compensate to keep torso upright.
+        # URDF axes: l_ank_pitch axis -Y (opposite to l_hip_pitch axis Y)
+        # So ankle offset follows same pulse direction as hip offset.
+        # Also partially compensate for knee bend.
+        # Stand: l_ank=640, r_ank=360 (sum=1000)
+        l_ank_offset = l_hip_offset + l_knee_offset * 0.5
+        r_ank_offset = r_hip_offset + r_knee_offset * 0.5
+
+        p_l_ank_pitch = int(clamp(
+            STAND_PULSE['l_ank_pitch'] + l_ank_offset,
+            STAND_PULSE['l_ank_pitch'] - LEG_MAX_OFFSET,
+            STAND_PULSE['l_ank_pitch'] + LEG_MAX_OFFSET))
+        p_r_ank_pitch = int(clamp(
+            STAND_PULSE['r_ank_pitch'] - r_ank_offset,
+            STAND_PULSE['r_ank_pitch'] - LEG_MAX_OFFSET,
+            STAND_PULSE['r_ank_pitch'] + LEG_MAX_OFFSET))
+
+        # ---- Hold at stand: hip_yaw, hip_roll, ank_roll ----
+        # Not enough info from MediaPipe to control these safely
+        pulses = {
+            'l_hip_yaw':   STAND_PULSE['l_hip_yaw'],
+            'r_hip_yaw':   STAND_PULSE['r_hip_yaw'],
+            'l_hip_roll':  STAND_PULSE['l_hip_roll'],
+            'r_hip_roll':  STAND_PULSE['r_hip_roll'],
+            'l_hip_pitch': p_l_hip_pitch,
+            'r_hip_pitch': p_r_hip_pitch,
+            'l_knee':      p_l_knee,
+            'r_knee':      p_r_knee,
+            'l_ank_pitch': p_l_ank_pitch,
+            'r_ank_pitch': p_r_ank_pitch,
+            'l_ank_roll':  STAND_PULSE['l_ank_roll'],
+            'r_ank_roll':  STAND_PULSE['r_ank_roll'],
+        }
+
+        # Debug (once per second)
+        if int(time.time()) != getattr(self, '_leg_dbg_t', 0):
+            self._leg_dbg_t = int(time.time())
+            print('[LEG] hip_pitch L=%.1f R=%.1f | knee L=%.0f R=%.0f | ank_comp L=%.0f R=%.0f' % (
+                l_hip_angle, r_hip_angle, a_l_knee, a_r_knee, l_ank_offset, r_ank_offset), flush=True)
+
+        return pulses
+
+    # ------------------------------------------------------------------
     # Sliding window average
     # ------------------------------------------------------------------
     def _window_average(self):
         if len(self.pulse_window) < MIN_FRAMES_BEFORE_SEND:
             return None
         avg = {}
-        for joint in ARM_JOINTS:
+        for joint in ALL_JOINTS:
             vals = [p[joint] for p in self.pulse_window if joint in p]
             if vals:
                 avg[joint] = int(sum(vals) / len(vals))
-        return avg if len(avg) == len(ARM_JOINTS) else None
+        return avg if len(avg) == len(ALL_JOINTS) else None
 
     # ------------------------------------------------------------------
     # Draw landmarks on image (convert new API format to legacy for drawing)
@@ -573,36 +708,42 @@ class PoseMimic3DNode:
                 self._draw_landmarks(bgr_image, norm_lm)
 
                 # --- GESTURE CHECK ---
-                crossed = self._arms_crossed(norm_lm)
+                # Hands close together toggles between stand and follow
+                hands_close = self._hands_close(norm_lm)
 
-                if crossed:
+                if hands_close:
                     self.gesture_count += 1
                     self.no_gesture_count = 0
                 else:
                     self.no_gesture_count += 1
-                    if not self.in_stand_mode:
-                        self.gesture_count = 0
+                    self.gesture_count = 0
 
                 if not self.in_stand_mode and self.gesture_count >= STAND_GESTURE_FRAMES:
-                    rospy.loginfo('[PoseMimic3D] Arms crossed -> STAND!')
-                    print('[GESTURE] Arms crossed! Standing.', flush=True)
+                    rospy.loginfo('[PoseMimic3D] Hands close -> STAND!')
+                    print('[GESTURE] Hands close! Standing.', flush=True)
                     self._send_stand()
                     self.in_stand_mode = True
                     self.gesture_count = 0
 
-                if self.in_stand_mode and self.no_gesture_count >= RESUME_FRAMES:
-                    rospy.loginfo('[PoseMimic3D] Resuming.')
-                    print('[GESTURE] Resuming follow.', flush=True)
+                if self.in_stand_mode and self.gesture_count >= STAND_GESTURE_FRAMES:
+                    rospy.loginfo('[PoseMimic3D] Hands close again -> RESUME!')
+                    print('[GESTURE] Hands close! Resuming follow.', flush=True)
                     self.in_stand_mode = False
-                    self.no_gesture_count = 0
+                    self.gesture_count = 0
 
-                # --- Arm control ---
+                # --- Arm + Leg control ---
                 if self.in_stand_mode:
-                    cv2.putText(bgr_image, 'STANDING (uncross to resume)', (10, 30),
+                    cv2.putText(bgr_image, 'STANDING (hands together to resume)', (10, 30),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
                 else:
-                    pulses = self.compute_all_arm_pulses(world_lm, norm_lm, width, height)
-                    if pulses is not None:
+                    arm_pulses = self.compute_all_arm_pulses(world_lm, norm_lm, width, height)
+                    leg_pulses = self.compute_leg_pulses(world_lm)
+
+                    if arm_pulses is not None and leg_pulses is not None:
+                        pulses = {}
+                        pulses.update(arm_pulses)
+                        pulses.update(leg_pulses)
+
                         self.pulse_window.append(pulses)
                         self.frame_count += 1
 
@@ -618,7 +759,7 @@ class PoseMimic3DNode:
                             if avg_pulses is not None:
                                 servo_cmds = []
                                 info_lines = []
-                                for joint_name in ARM_JOINTS:
+                                for joint_name in ALL_JOINTS:
                                     pulse = avg_pulses[joint_name]
                                     last = self.last_pulse.get(joint_name, STAND_PULSE[joint_name])
                                     if abs(pulse - last) < DEADZONE_PULSE:
@@ -628,7 +769,7 @@ class PoseMimic3DNode:
                                     servo_cmds.append([SERVO_ID[joint_name], pulse])
                                     info_lines.append('%s:%d' % (joint_name, pulse))
 
-                                self.motion_manager.set_servos_position(600, servo_cmds)
+                                self.motion_manager.set_servos_position(1200, servo_cmds)
                                 print('[SEND] %s' % ' | '.join(info_lines), flush=True)
 
                             self.frame_count = 0
@@ -643,6 +784,15 @@ class PoseMimic3DNode:
                             cv2.putText(bgr_image, '%s %s: %d' % (side, jname, pulses.get(j, 0)),
                                         (10, y_off), cv2.FONT_HERSHEY_SIMPLEX, 0.35,
                                         (0, 255, 0), 1)
+                            y_off += 16
+                        # Show active leg joints (hip_pitch, knee, ank_pitch)
+                        for j in ['l_hip_pitch', 'r_hip_pitch', 'l_knee', 'r_knee',
+                                   'l_ank_pitch', 'r_ank_pitch']:
+                            side = 'L' if j.startswith('l') else 'R'
+                            jname = j.split('_', 1)[1]
+                            cv2.putText(bgr_image, '%s %s: %d' % (side, jname, pulses.get(j, 0)),
+                                        (10, y_off), cv2.FONT_HERSHEY_SIMPLEX, 0.35,
+                                        (0, 200, 255), 1)
                             y_off += 16
                     else:
                         cv2.putText(bgr_image, 'Angle calc failed', (10, 30),

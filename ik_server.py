@@ -3,12 +3,15 @@
 Pinocchio IK Server — runs as subprocess, communicates via stdin/stdout JSON.
 
 Protocol:
-  Input (JSON per line):  {"side": "left", "target": [x, y, z]}
-  Output (JSON per line): {"side": "left", "joints": {"l_sho_pitch": 1.2, ...}, "ok": true}
-                          or {"ok": false, "error": "..."}
+  Input (JSON per line):
+    {"side": "left", "elbow_target": [x,y,z], "wrist_target": [x,y,z]}
+  Output (JSON per line):
+    {"side": "left", "joints": {"l_sho_pitch": 1.2, ...}, "ok": true}
+    or {"ok": false, "error": "..."}
 
   Special commands:
     {"cmd": "fk_stand"}  → returns standing FK positions of shoulders and grippers
+    {"cmd": "reset"}     → reset warm-start to standing
     {"cmd": "quit"}      → exit
 
 Run with: /home/ubuntu/miniforge3/envs/pin/bin/python3 ik_server.py
@@ -129,6 +132,10 @@ class IKServer:
             'left': np.linalg.norm(self.stand_fk['l_el_pitch'] - self.stand_fk['l_sho_pitch']),
             'right': np.linalg.norm(self.stand_fk['r_el_pitch'] - self.stand_fk['r_sho_pitch']),
         }
+        self.forearm_length = {
+            'left': np.linalg.norm(self.stand_fk['l_gripper'] - self.stand_fk['l_el_pitch']),
+            'right': np.linalg.norm(self.stand_fk['r_gripper'] - self.stand_fk['r_el_pitch']),
+        }
 
         # Last solved q for warm-starting
         self.q_last = {
@@ -136,78 +143,72 @@ class IKServer:
             'right': self.q_stand.copy(),
         }
 
-        sys.stderr.write("[IK] Model loaded: %d DOF, arm_len L=%.1fcm R=%.1fcm, upper L=%.1fcm R=%.1fcm\n" % (
+        sys.stderr.write("[IK] Model loaded: %d DOF, arm L=%.1f/R=%.1fcm, upper L=%.1f/R=%.1fcm, fore L=%.1f/R=%.1fcm\n" % (
             self.model.nq,
             self.arm_length['left'] * 100,
             self.arm_length['right'] * 100,
             self.upper_arm_length['left'] * 100,
-            self.upper_arm_length['right'] * 100))
+            self.upper_arm_length['right'] * 100,
+            self.forearm_length['left'] * 100,
+            self.forearm_length['right'] * 100))
         sys.stderr.flush()
 
-    def solve(self, side, target_pos, elbow_hint=None, max_iter=150, eps=1e-3, damp=1e-6):
+    def solve(self, side, elbow_target, wrist_target, max_iter=150, eps=1e-3, damp=1e-6):
         """Jacobian pseudo-inverse IK for one arm.
 
-        With elbow_hint: stacks wrist(3) + weighted elbow(3) = 6 constraints for 4 DOF.
-        Over-constrained → least-squares via pseudo-inverse. Resolves 1-DOF ambiguity.
+        Tracks both elbow and wrist simultaneously:
+        6 constraints (3 elbow + 3 wrist) for 4 DOF → over-constrained least-squares.
+        - Elbow position (3) → constrains sho_pitch, sho_roll
+        - Wrist position (3) → constrains el_pitch, el_yaw
         """
         info = self.arm_info[side]
         frame_id = info['frame_id']
         elbow_frame_id = info['elbow_frame_id']
         q_indices = info['q_indices']
         v_indices = info['v_indices']
-        elbow_w = 0.15  # weight for elbow constraint (lower = softer)
 
-        # Warm-start from last solution
         q = self.q_last[side].copy()
-        target = np.array(target_pos)
-        elbow_target = np.array(elbow_hint) if elbow_hint is not None else None
+        elbow_tgt = np.array(elbow_target)
+        wrist_tgt = np.array(wrist_target)
+
+        best_err = 1e9
+        best_q = q.copy()
 
         for i in range(max_iter):
             pin.forwardKinematics(self.model, self.data, q)
             pin.updateFramePlacements(self.model, self.data)
 
-            # Wrist error
+            elbow_pos = self.data.oMf[elbow_frame_id].translation.copy()
             wrist_pos = self.data.oMf[frame_id].translation.copy()
-            wrist_error = target - wrist_pos
-            err_norm = np.linalg.norm(wrist_error)
 
-            # Wrist Jacobian (3 x nDOF)
+            elbow_error = elbow_tgt - elbow_pos
+            wrist_error = wrist_tgt - wrist_pos
+
+            # Stack errors: [elbow(3); wrist(3)]
+            error = np.concatenate([elbow_error, wrist_error])
+            err_norm = np.linalg.norm(error)
+
+            if err_norm < best_err:
+                best_err = err_norm
+                best_q = q.copy()
+
+            if err_norm < eps:
+                self.q_last[side] = q.copy()
+                joints = {}
+                for jname, qi in zip(info['joints'], q_indices):
+                    joints[jname] = float(q[qi])
+                return True, joints, float(np.linalg.norm(wrist_error))
+
+            # Stack Jacobians: [J_elbow(3xN); J_wrist(3xN)] → 6xN, extract arm columns → 6x4
+            J_elbow = pin.computeFrameJacobian(
+                self.model, self.data, q, elbow_frame_id, pin.LOCAL_WORLD_ALIGNED)[:3, v_indices]
             J_wrist = pin.computeFrameJacobian(
                 self.model, self.data, q, frame_id, pin.LOCAL_WORLD_ALIGNED)[:3, v_indices]
+            J = np.vstack([J_elbow, J_wrist])  # 6x4
 
-            if elbow_target is not None:
-                # Elbow error
-                elbow_pos = self.data.oMf[elbow_frame_id].translation.copy()
-                elbow_error = elbow_target - elbow_pos
-
-                # Elbow Jacobian
-                J_elbow = pin.computeFrameJacobian(
-                    self.model, self.data, q, elbow_frame_id, pin.LOCAL_WORLD_ALIGNED)[:3, v_indices]
-
-                # Stack: [wrist_error; w * elbow_error]
-                combined_error = np.concatenate([wrist_error, elbow_w * elbow_error])
-                combined_J = np.vstack([J_wrist, elbow_w * J_elbow])
-
-                # Check convergence
-                if err_norm < eps and np.linalg.norm(elbow_error) < eps * 5:
-                    self.q_last[side] = q.copy()
-                    joints = {}
-                    for jname, qi in zip(info['joints'], q_indices):
-                        joints[jname] = float(q[qi])
-                    return True, joints, err_norm
-
-                JJT = combined_J @ combined_J.T + damp * np.eye(6)
-                dq_arm = combined_J.T @ np.linalg.solve(JJT, combined_error)
-            else:
-                if err_norm < eps:
-                    self.q_last[side] = q.copy()
-                    joints = {}
-                    for jname, qi in zip(info['joints'], q_indices):
-                        joints[jname] = float(q[qi])
-                    return True, joints, err_norm
-
-                JJT = J_wrist @ J_wrist.T + damp * np.eye(3)
-                dq_arm = J_wrist.T @ np.linalg.solve(JJT, wrist_error)
+            # Damped pseudo-inverse: dq = J^T (J J^T + λI)^{-1} error
+            JJT = J @ J.T + damp * np.eye(6)
+            dq_arm = J.T @ np.linalg.solve(JJT, error)
 
             # Limit step size
             max_step = 0.15
@@ -220,12 +221,17 @@ class IKServer:
 
             q = np.clip(q, self.model.lowerPositionLimit, self.model.upperPositionLimit)
 
-        # Didn't converge — still return best result
-        self.q_last[side] = q.copy()
+        # Didn't converge — return best result
+        self.q_last[side] = best_q.copy()
+        pin.forwardKinematics(self.model, self.data, best_q)
+        pin.updateFramePlacements(self.model, self.data)
+        wrist_pos = self.data.oMf[frame_id].translation.copy()
+        final_wrist_err = float(np.linalg.norm(wrist_tgt - wrist_pos))
+
         joints = {}
         for jname, qi in zip(info['joints'], q_indices):
-            joints[jname] = float(q[qi])
-        return False, joints, float(err_norm)
+            joints[jname] = float(best_q[qi])
+        return False, joints, final_wrist_err
 
     def handle_fk_stand(self):
         """Return FK positions for standing pose."""
@@ -241,6 +247,8 @@ class IKServer:
             'arm_length_right': float(self.arm_length['right']),
             'upper_arm_length_left': float(self.upper_arm_length['left']),
             'upper_arm_length_right': float(self.upper_arm_length['right']),
+            'forearm_length_left': float(self.forearm_length['left']),
+            'forearm_length_right': float(self.forearm_length['right']),
         }
         return result
 
@@ -280,15 +288,14 @@ class IKServer:
                 sys.stderr.write("[IK] Reset warm-start for %s\n" % side)
                 print(json.dumps({'ok': True, 'cmd': 'reset'}), flush=True)
 
-            elif 'side' in req and 'target' in req:
+            elif 'side' in req and 'elbow_target' in req and 'wrist_target' in req:
                 side = req['side']
-                target = req['target']
                 if side not in ('left', 'right'):
                     print(json.dumps({'ok': False, 'error': 'side must be left or right'}), flush=True)
                     continue
 
-                elbow_hint = req.get('elbow_hint', None)
-                ok, joints, err = self.solve(side, target, elbow_hint=elbow_hint)
+                ok, joints, err = self.solve(
+                    side, req['elbow_target'], req['wrist_target'])
                 resp = {
                     'ok': ok,
                     'side': side,

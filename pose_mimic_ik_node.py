@@ -110,34 +110,13 @@ SEND_EVERY = 12          # ~1.2 seconds at 10Hz
 MIN_FRAMES_BEFORE_SEND = 5
 DEADZONE_PULSE = 15
 
-# --- Rotation mapping ---
-# Human neutral (arms at sides) → direction (0,0,-1) in "human robot frame"
-# Robot standing → direction d_stand (from FK)
-# We precompute R that maps (0,0,-1) → d_stand, then for any human direction
-# d_human, the robot target direction is R @ d_human.
-# This guarantees targets are always on the arm-length sphere (always reachable).
-
-def rotation_between_vectors(v1, v2):
-    """Rotation matrix that maps unit vector v1 to unit vector v2 (Rodrigues)."""
-    v1 = v1 / np.linalg.norm(v1)
-    v2 = v2 / np.linalg.norm(v2)
-    cross = np.cross(v1, v2)
-    dot = np.dot(v1, v2)
-    cross_norm = np.linalg.norm(cross)
-    if cross_norm < 1e-8:
-        if dot > 0:
-            return np.eye(3)
-        # Opposite — 180° around any perpendicular axis
-        perp = np.array([1, 0, 0]) if abs(v1[0]) < 0.9 else np.array([0, 1, 0])
-        perp = perp - np.dot(perp, v1) * v1
-        perp = perp / np.linalg.norm(perp)
-        return 2 * np.outer(perp, perp) - np.eye(3)
-    K = np.array([
-        [0, -cross[2], cross[1]],
-        [cross[2], 0, -cross[0]],
-        [-cross[1], cross[0], 0]
-    ])
-    return np.eye(3) + K + K @ K * (1.0 / (1.0 + dot))
+def mp_world_to_robot(vec):
+    """Convert MediaPipe world coordinate vector to robot URDF frame.
+    MediaPipe world (after cv2.flip): X=person's real right, Y=down, Z=away from camera
+    Robot URDF/ROS: X=forward, Y=left, Z=up
+    Mirror: person's right → robot's left (+Y), person's backward → robot's backward (-X)
+    """
+    return np.array([-vec[2], vec[0], -vec[1]])
 
 
 def rad_to_pulse(rad):
@@ -201,40 +180,18 @@ class PoseMimicIKNode:
             'left': fk_info['upper_arm_length_left'],
             'right': fk_info['upper_arm_length_right'],
         }
-        self.gripper_pos = {
-            'left': np.array(fk_info['gripper_left']),
-            'right': np.array(fk_info['gripper_right']),
-        }
-        self.elbow_pos = {
-            'left': np.array(fk_info['elbow_left']),
-            'right': np.array(fk_info['elbow_right']),
+        self.forearm_length = {
+            'left': fk_info['forearm_length_left'],
+            'right': fk_info['forearm_length_right'],
         }
 
-        # Precompute rotation matrices:
-        # Maps human-neutral direction (0,0,-1) to robot standing arm direction
-        # So any human arm direction d_human → R @ d_human → always on the reachable sphere
-        HUMAN_NEUTRAL = np.array([0.0, 0.0, -1.0])  # "arm hanging down"
-        self.stand_rotation = {}
-        self.stand_elbow_rotation = {}
-        for side in ('left', 'right'):
-            # Full arm (shoulder → gripper) standing direction
-            d_arm = self.gripper_pos[side] - self.shoulder_pos[side]
-            d_arm = d_arm / np.linalg.norm(d_arm)
-            self.stand_rotation[side] = rotation_between_vectors(HUMAN_NEUTRAL, d_arm)
-
-            # Upper arm (shoulder → elbow) standing direction
-            d_upper = self.elbow_pos[side] - self.shoulder_pos[side]
-            d_upper = d_upper / np.linalg.norm(d_upper)
-            self.stand_elbow_rotation[side] = rotation_between_vectors(HUMAN_NEUTRAL, d_upper)
-
-        print("[IK] Standing FK: L_sho=%s R_sho=%s arm=%.1fcm upper=%.1fcm" % (
+        print("[IK] Standing FK: L_sho=%s R_sho=%s" % (
             np.round(self.shoulder_pos['left'] * 100, 1),
-            np.round(self.shoulder_pos['right'] * 100, 1),
-            self.arm_length['left'] * 100,
-            self.upper_arm_length['left'] * 100), flush=True)
-        print("[IK] Stand dirs: L_grip=%s R_grip=%s" % (
-            np.round((self.gripper_pos['left'] - self.shoulder_pos['left']) * 100, 1),
-            np.round((self.gripper_pos['right'] - self.shoulder_pos['right']) * 100, 1)), flush=True)
+            np.round(self.shoulder_pos['right'] * 100, 1)), flush=True)
+        print("[IK] Bone lengths: upper=%.1f/%.1fcm fore=%.1f/%.1fcm total=%.1f/%.1fcm" % (
+            self.upper_arm_length['left'] * 100, self.upper_arm_length['right'] * 100,
+            self.forearm_length['left'] * 100, self.forearm_length['right'] * 100,
+            self.arm_length['left'] * 100, self.arm_length['right'] * 100), flush=True)
 
         # ---- MediaPipe PoseLandmarker ----
         base_options = mp_python.BaseOptions(model_asset_path=MODEL_PATH)
@@ -309,11 +266,14 @@ class PoseMimicIKNode:
             return None
         return json.loads(line.decode())
 
-    def _ik_solve(self, side, target, elbow_hint=None):
-        """Solve IK for one arm. Returns dict of {joint: rad} or None."""
-        msg = {'side': side, 'target': target.tolist()}
-        if elbow_hint is not None:
-            msg['elbow_hint'] = elbow_hint.tolist()
+    def _ik_solve(self, side, targets):
+        """Solve IK for one arm with elbow + wrist targets.
+        Returns dict of {joint: rad} or None."""
+        msg = {
+            'side': side,
+            'elbow_target': targets['elbow'],
+            'wrist_target': targets['wrist'],
+        }
         self._ik_send(msg)
         resp = self._ik_recv()
         if resp and resp.get('joints'):
@@ -361,91 +321,66 @@ class PoseMimicIKNode:
     # ------------------------------------------------------------------
     # Compute IK targets from MediaPipe landmarks
     # ------------------------------------------------------------------
-    def compute_ik_targets(self, world_lm, norm_lm, width, height):
-        """Compute IK targets using rotation mapping:
+    def compute_ik_targets(self, world_lm):
+        """Compute IK targets: elbow and wrist positions in robot URDF frame.
 
-        1. Compute human arm direction from pitch (world Y,Z) + roll (screen coords)
-        2. Apply precomputed rotation R that maps human-neutral → robot-standing
-        3. Target = shoulder + R(d_human) * arm_length → always on reachable sphere
+        Uses two direction vectors per arm:
+        - upper arm: shoulder → elbow direction (constrains sho_pitch, sho_roll)
+        - forearm: elbow → wrist direction (constrains el_pitch, el_yaw)
 
-        This avoids:
-        - Unreliable world X (screen-based lateral instead)
-        - Unreachable targets (rotation keeps targets on the arm sphere)
+        Each direction is extracted from MediaPipe world coords, converted to
+        robot URDF frame via mp_world_to_robot, then scaled by AiNex bone lengths.
         """
         targets = {}
 
+        # After cv2.flip: landmark 11 = person's actual RIGHT = robot LEFT
         for side, sho_idx, elb_idx, wri_idx in [
             ('left', 11, 13, 15),
             ('right', 12, 14, 16),
         ]:
-            # World landmarks (Y, Z only for pitch)
-            sho_w = np.array([world_lm[sho_idx].x, world_lm[sho_idx].y, world_lm[sho_idx].z])
-            elb_w = np.array([world_lm[elb_idx].x, world_lm[elb_idx].y, world_lm[elb_idx].z])
-            wri_w = np.array([world_lm[wri_idx].x, world_lm[wri_idx].y, world_lm[wri_idx].z])
+            sho = np.array([world_lm[sho_idx].x, world_lm[sho_idx].y, world_lm[sho_idx].z])
+            elb = np.array([world_lm[elb_idx].x, world_lm[elb_idx].y, world_lm[elb_idx].z])
+            wri = np.array([world_lm[wri_idx].x, world_lm[wri_idx].y, world_lm[wri_idx].z])
 
-            # Screen landmarks (for lateral direction)
-            sho_px = np.array([norm_lm[sho_idx].x * width, norm_lm[sho_idx].y * height])
-            elb_px = np.array([norm_lm[elb_idx].x * width, norm_lm[elb_idx].y * height])
-            wri_px = np.array([norm_lm[wri_idx].x * width, norm_lm[wri_idx].y * height])
-
-            # === UPPER ARM (shoulder → elbow) → elbow target ===
-            upper_w = elb_w - sho_w
-            if abs(upper_w[1]) + abs(upper_w[2]) < 0.01:
+            # Upper arm direction (shoulder → elbow) in MediaPipe coords
+            upper_dir = elb - sho
+            upper_len = np.linalg.norm(upper_dir)
+            if upper_len < 0.01:
                 return None
-            upper_pitch = math.atan2(-upper_w[2], upper_w[1])
+            upper_dir = upper_dir / upper_len
 
-            upper_dx = elb_px[0] - sho_px[0]
-            upper_dy = elb_px[1] - sho_px[1]
-            if math.sqrt(upper_dx**2 + upper_dy**2) < 1:
+            # Forearm direction (elbow → wrist) in MediaPipe coords
+            fore_dir = wri - elb
+            fore_len = np.linalg.norm(fore_dir)
+            if fore_len < 0.01:
                 return None
-            upper_roll = math.atan2(-upper_dx, upper_dy)
+            fore_dir = fore_dir / fore_len
 
-            # Human direction: (pitch=0,roll=0) → (0,0,-1) = arm down = neutral
-            sp, cp = math.sin(upper_pitch), math.cos(upper_pitch)
-            sr, cr = math.sin(upper_roll), math.cos(upper_roll)
-            d_human_upper = np.array([sp, sr * cp, -cp * cr])
-            n = np.linalg.norm(d_human_upper)
-            if n > 0.01:
-                d_human_upper /= n
+            # Convert to robot URDF frame
+            robot_upper = mp_world_to_robot(upper_dir)
+            robot_fore = mp_world_to_robot(fore_dir)
 
-            # Rotate: human neutral → robot standing direction
-            d_robot_upper = self.stand_elbow_rotation[side] @ d_human_upper
-            elbow_tgt = self.shoulder_pos[side] + d_robot_upper * self.upper_arm_length[side]
-            targets[side + '_elbow'] = elbow_tgt
+            # Build target positions using AiNex bone lengths
+            # Elbow: from robot shoulder along upper arm direction
+            elbow_tgt = self.shoulder_pos[side] + robot_upper * self.upper_arm_length[side]
+            # Wrist: from elbow along forearm direction (chained, not from shoulder!)
+            wrist_tgt = elbow_tgt + robot_fore * self.forearm_length[side]
 
-            # === FULL ARM (shoulder → wrist) → wrist target ===
-            full_w = wri_w - sho_w
-            if abs(full_w[1]) + abs(full_w[2]) < 0.01:
-                return None
-            full_pitch = math.atan2(-full_w[2], full_w[1])
-
-            full_dx = wri_px[0] - sho_px[0]
-            full_dy = wri_px[1] - sho_px[1]
-            if math.sqrt(full_dx**2 + full_dy**2) < 1:
-                return None
-            full_roll = math.atan2(-full_dx, full_dy)
-
-            sp, cp = math.sin(full_pitch), math.cos(full_pitch)
-            sr, cr = math.sin(full_roll), math.cos(full_roll)
-            d_human_full = np.array([sp, sr * cp, -cp * cr])
-            n = np.linalg.norm(d_human_full)
-            if n > 0.01:
-                d_human_full /= n
-
-            d_robot_full = self.stand_rotation[side] @ d_human_full
-            wrist_tgt = self.shoulder_pos[side] + d_robot_full * self.arm_length[side]
-            targets[side] = wrist_tgt
+            targets[side] = {
+                'elbow': elbow_tgt.tolist(),
+                'wrist': wrist_tgt.tolist(),
+            }
 
         # Debug (once per second)
         if int(time.time()) != getattr(self, '_tgt_dbg_t', 0):
             self._tgt_dbg_t = int(time.time())
-            lt = targets['left'] * 100
-            rt = targets['right'] * 100
-            # Show distance from standing gripper
-            dl = np.linalg.norm(targets['left'] - self.gripper_pos['left']) * 100
-            dr = np.linalg.norm(targets['right'] - self.gripper_pos['right']) * 100
-            print('[TGT] L=[%.1f,%.1f,%.1f] R=[%.1f,%.1f,%.1f]cm dist_from_stand L=%.1f R=%.1fcm' % (
-                lt[0], lt[1], lt[2], rt[0], rt[1], rt[2], dl, dr), flush=True)
+            le = np.array(targets['left']['elbow']) * 100
+            lw = np.array(targets['left']['wrist']) * 100
+            re = np.array(targets['right']['elbow']) * 100
+            rw = np.array(targets['right']['wrist']) * 100
+            print('[TGT] L_elb=[%.1f,%.1f,%.1f] L_wri=[%.1f,%.1f,%.1f] R_elb=[%.1f,%.1f,%.1f] R_wri=[%.1f,%.1f,%.1f]cm' % (
+                le[0], le[1], le[2], lw[0], lw[1], lw[2],
+                re[0], re[1], re[2], rw[0], rw[1], rw[2]), flush=True)
 
         return targets
 
@@ -552,14 +487,12 @@ class PoseMimicIKNode:
                     cv2.putText(bgr_image, 'STANDING (hands together to resume)', (10, 30),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
                 else:
-                    targets = self.compute_ik_targets(world_lm, norm_lm, width, height)
+                    targets = self.compute_ik_targets(world_lm)
 
                     if targets is not None:
-                        # Solve IK for both arms (with elbow hints)
-                        l_joints, l_err = self._ik_solve('left', targets['left'],
-                                                          elbow_hint=targets.get('left_elbow'))
-                        r_joints, r_err = self._ik_solve('right', targets['right'],
-                                                          elbow_hint=targets.get('right_elbow'))
+                        # Solve IK for both arms (elbow + wrist targets)
+                        l_joints, l_err = self._ik_solve('left', targets['left'])
+                        r_joints, r_err = self._ik_solve('right', targets['right'])
 
                         if l_joints and r_joints:
                             pulses = self.ik_joints_to_pulses(l_joints, r_joints)

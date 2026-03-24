@@ -533,12 +533,17 @@ class PoseMimic3DNode:
         """Compute leg servo pulses from MediaPipe world landmarks.
 
         Landmarks (after image flip):
-          23=left hip, 24=right hip, 25=left knee, 26=right knee,
-          27=left ankle, 28=right ankle.
+          23=left hip, 24=right hip, 25=left knee, 26=right knee.
         Due to flip: landmark 23 = person's actual RIGHT → robot LEFT leg.
 
-        Controls: hip_pitch, knee, ank_pitch (with stability compensation).
-        Holds at stand: hip_yaw, hip_roll, ank_roll.
+        Controls: hip_yaw (servo 11/12) and hip_roll (servo 9/10).
+        Holds at stand: hip_pitch, knee, ank_pitch, ank_roll.
+
+        Servo ranges (user-tested):
+          Servo 9  (l_hip_roll): 400-600, 400=outward 30°, 600=inward 20°
+          Servo 10 (r_hip_roll): 400-600, 400=inward 20°, 600=outward 30°
+          Servo 11 (l_hip_yaw):  300-600, 300=outward 45°, 600=inward 20°
+          Servo 12 (r_hip_yaw):  400-700, 400=inward 20°, 700=outward 45°
 
         Returns dict of {joint_name: pulse}."""
 
@@ -546,99 +551,75 @@ class PoseMimic3DNode:
         r_hip = np.array([world_lm[24].x, world_lm[24].y, world_lm[24].z])
         l_knee_pt = np.array([world_lm[25].x, world_lm[25].y, world_lm[25].z])
         r_knee_pt = np.array([world_lm[26].x, world_lm[26].y, world_lm[26].z])
-        l_ankle = np.array([world_lm[27].x, world_lm[27].y, world_lm[27].z])
-        r_ankle = np.array([world_lm[28].x, world_lm[28].y, world_lm[28].z])
 
         l_upper_leg = l_knee_pt - l_hip    # hip → knee vector
         r_upper_leg = r_knee_pt - r_hip
-        l_lower_leg = l_ankle - l_knee_pt  # knee → ankle vector
-        r_lower_leg = r_ankle - r_knee_pt
 
-        # ---- Hip pitch: atan2(-Z, Y) of upper leg vector ----
-        # Standing: Y>0(down), Z≈0 → angle≈0
-        # Leg forward: Z<0 → positive angle
-        # Leg backward: Z>0 → negative angle
-        l_hip_angle = math.degrees(math.atan2(-l_upper_leg[2], l_upper_leg[1]))
-        r_hip_angle = math.degrees(math.atan2(-r_upper_leg[2], r_upper_leg[1]))
+        # ---- Hip yaw (servo 11/12): forward/backward leg swing ----
+        # atan2(-Z, Y): standing→0°, forward→positive, backward→negative
+        # MediaPipe world: Y=down(+), Z=away from camera(+)=toward person's back
+        l_yaw_angle = math.degrees(math.atan2(-l_upper_leg[2], l_upper_leg[1]))
+        r_yaw_angle = math.degrees(math.atan2(-r_upper_leg[2], r_upper_leg[1]))
 
-        l_hip_angle = clamp(l_hip_angle, -20, 40)  # conservative: 20° back, 40° forward
-        r_hip_angle = clamp(r_hip_angle, -20, 40)
+        l_yaw_angle = clamp(l_yaw_angle, -20, 45)
+        r_yaw_angle = clamp(r_yaw_angle, -20, 45)
 
-        # ---- Knee bend: angle between -upper_leg and lower_leg ----
-        # 180° = straight, smaller = bent
-        a_l_knee = angle_between_vectors_3d(-l_upper_leg, l_lower_leg)
-        a_r_knee = angle_between_vectors_3d(-r_upper_leg, r_lower_leg)
+        l_yaw_offset = l_yaw_angle * UNITS_PER_DEG
+        r_yaw_offset = r_yaw_angle * UNITS_PER_DEG
 
-        if a_l_knee is None:
-            a_l_knee = 180.0
-        if a_r_knee is None:
-            a_r_knee = 180.0
+        # Servo 11 (l_hip_yaw): 300-600, stand=500
+        #   forward(+) → lower pulse (toward 300=outward)
+        p_l_hip_yaw = int(clamp(
+            STAND_PULSE['l_hip_yaw'] - l_yaw_offset,
+            300, 600))
 
-        a_l_knee = clamp(a_l_knee, 120, 180)  # max bend 120°, straight 180°
-        a_r_knee = clamp(a_r_knee, 120, 180)
+        # Servo 12 (r_hip_yaw): 400-700, stand=500
+        #   forward(+) → higher pulse (toward 700=outward)
+        p_r_hip_yaw = int(clamp(
+            STAND_PULSE['r_hip_yaw'] + r_yaw_offset,
+            400, 700))
 
-        # ---- Convert to pulse offsets from stand ----
-        # Hip pitch: forward(+) → pulse increases for left, decreases for right
-        # (URDF: l_hip_pitch axis Y, r_hip_pitch axis -Y, mirror mounted)
-        # Stand: l=350, r=650 (sum=1000)
-        l_hip_offset = l_hip_angle * UNITS_PER_DEG
-        r_hip_offset = r_hip_angle * UNITS_PER_DEG
+        # ---- Hip roll (servo 9/10): lateral leg tilt ----
+        # atan2(X, Y): standing→0°, lateral deviation→angle
+        # MediaPipe world X = person's left direction
+        # After flip: landmark 23 = person's right → robot left
+        #   Robot left outward: l_upper_leg[0] < 0 (person's right = X negative)
+        #   Robot right outward: r_upper_leg[0] > 0 (person's left = X positive)
+        l_roll_angle = math.degrees(math.atan2(l_upper_leg[0], l_upper_leg[1]))
+        r_roll_angle = math.degrees(math.atan2(r_upper_leg[0], r_upper_leg[1]))
 
-        p_l_hip_pitch = int(clamp(
-            STAND_PULSE['l_hip_pitch'] + l_hip_offset,
-            STAND_PULSE['l_hip_pitch'] - LEG_MAX_OFFSET,
-            STAND_PULSE['l_hip_pitch'] + LEG_MAX_OFFSET))
-        p_r_hip_pitch = int(clamp(
-            STAND_PULSE['r_hip_pitch'] - r_hip_offset,
-            STAND_PULSE['r_hip_pitch'] - LEG_MAX_OFFSET,
-            STAND_PULSE['r_hip_pitch'] + LEG_MAX_OFFSET))
+        l_roll_angle = clamp(l_roll_angle, -30, 20)  # neg=outward, pos=inward for left
+        r_roll_angle = clamp(r_roll_angle, -20, 30)   # pos=outward, neg=inward for right
 
-        # Knee: bend(smaller angle) → offset from straight
-        # l_knee axis Y: bend → pulse increases; r_knee axis -Y: bend → pulse decreases
-        # Stand: both 500 (straight)
-        l_knee_offset = (180 - a_l_knee) * UNITS_PER_DEG
-        r_knee_offset = (180 - a_r_knee) * UNITS_PER_DEG
+        l_roll_offset = l_roll_angle * UNITS_PER_DEG
+        r_roll_offset = r_roll_angle * UNITS_PER_DEG
 
-        p_l_knee = int(clamp(
-            STAND_PULSE['l_knee'] + l_knee_offset,
-            STAND_PULSE['l_knee'] - LEG_MAX_OFFSET,
-            STAND_PULSE['l_knee'] + LEG_MAX_OFFSET))
-        p_r_knee = int(clamp(
-            STAND_PULSE['r_knee'] - r_knee_offset,
-            STAND_PULSE['r_knee'] - LEG_MAX_OFFSET,
-            STAND_PULSE['r_knee'] + LEG_MAX_OFFSET))
+        # Servo 9 (l_hip_roll): 400-600, stand=500
+        #   outward(negative angle) → lower pulse (toward 400)
+        #   inward(positive angle)  → higher pulse (toward 600)
+        p_l_hip_roll = int(clamp(
+            STAND_PULSE['l_hip_roll'] + l_roll_offset,
+            400, 600))
 
-        # ---- Ankle pitch: stability compensation ----
-        # When hip pitches forward, ankle must compensate to keep torso upright.
-        # URDF axes: l_ank_pitch axis -Y (opposite to l_hip_pitch axis Y)
-        # So ankle offset follows same pulse direction as hip offset.
-        # Also partially compensate for knee bend.
-        # Stand: l_ank=640, r_ank=360 (sum=1000)
-        l_ank_offset = l_hip_offset + l_knee_offset * 0.5
-        r_ank_offset = r_hip_offset + r_knee_offset * 0.5
+        # Servo 10 (r_hip_roll): 400-600, stand=500
+        #   outward(positive angle) → higher pulse (toward 600)
+        #   inward(negative angle)  → lower pulse (toward 400)
+        p_r_hip_roll = int(clamp(
+            STAND_PULSE['r_hip_roll'] + r_roll_offset,
+            400, 600))
 
-        p_l_ank_pitch = int(clamp(
-            STAND_PULSE['l_ank_pitch'] + l_ank_offset,
-            STAND_PULSE['l_ank_pitch'] - LEG_MAX_OFFSET,
-            STAND_PULSE['l_ank_pitch'] + LEG_MAX_OFFSET))
-        p_r_ank_pitch = int(clamp(
-            STAND_PULSE['r_ank_pitch'] - r_ank_offset,
-            STAND_PULSE['r_ank_pitch'] - LEG_MAX_OFFSET,
-            STAND_PULSE['r_ank_pitch'] + LEG_MAX_OFFSET))
-
-        # ---- Hold at stand: hip_yaw, hip_roll, ank_roll ----
-        # Not enough info from MediaPipe to control these safely
+        # ---- Hold at stand: hip_pitch, knee, ank_pitch, ank_roll ----
         pulses = {
-            'l_hip_yaw':   STAND_PULSE['l_hip_yaw'],
-            'r_hip_yaw':   STAND_PULSE['r_hip_yaw'],
-            'l_hip_roll':  STAND_PULSE['l_hip_roll'],
-            'r_hip_roll':  STAND_PULSE['r_hip_roll'],
-            'l_hip_pitch': p_l_hip_pitch,
-            'r_hip_pitch': p_r_hip_pitch,
-            'l_knee':      p_l_knee,
-            'r_knee':      p_r_knee,
-            'l_ank_pitch': p_l_ank_pitch,
-            'r_ank_pitch': p_r_ank_pitch,
+            'l_hip_yaw':   p_l_hip_yaw,
+            'r_hip_yaw':   p_r_hip_yaw,
+            'l_hip_roll':  p_l_hip_roll,
+            'r_hip_roll':  p_r_hip_roll,
+            'l_hip_pitch': STAND_PULSE['l_hip_pitch'],
+            'r_hip_pitch': STAND_PULSE['r_hip_pitch'],
+            'l_knee':      STAND_PULSE['l_knee'],
+            'r_knee':      STAND_PULSE['r_knee'],
+            'l_ank_pitch': STAND_PULSE['l_ank_pitch'],
+            'r_ank_pitch': STAND_PULSE['r_ank_pitch'],
             'l_ank_roll':  STAND_PULSE['l_ank_roll'],
             'r_ank_roll':  STAND_PULSE['r_ank_roll'],
         }
@@ -646,8 +627,9 @@ class PoseMimic3DNode:
         # Debug (once per second)
         if int(time.time()) != getattr(self, '_leg_dbg_t', 0):
             self._leg_dbg_t = int(time.time())
-            print('[LEG] hip_pitch L=%.1f R=%.1f | knee L=%.0f R=%.0f | ank_comp L=%.0f R=%.0f' % (
-                l_hip_angle, r_hip_angle, a_l_knee, a_r_knee, l_ank_offset, r_ank_offset), flush=True)
+            print('[LEG] yaw L=%.1f R=%.1f (p:%d/%d) | roll L=%.1f R=%.1f (p:%d/%d)' % (
+                l_yaw_angle, r_yaw_angle, p_l_hip_yaw, p_r_hip_yaw,
+                l_roll_angle, r_roll_angle, p_l_hip_roll, p_r_hip_roll), flush=True)
 
         return pulses
 
@@ -785,9 +767,8 @@ class PoseMimic3DNode:
                                         (10, y_off), cv2.FONT_HERSHEY_SIMPLEX, 0.35,
                                         (0, 255, 0), 1)
                             y_off += 16
-                        # Show active leg joints (hip_pitch, knee, ank_pitch)
-                        for j in ['l_hip_pitch', 'r_hip_pitch', 'l_knee', 'r_knee',
-                                   'l_ank_pitch', 'r_ank_pitch']:
+                        # Show active leg joints (hip_yaw, hip_roll)
+                        for j in ['l_hip_yaw', 'r_hip_yaw', 'l_hip_roll', 'r_hip_roll']:
                             side = 'L' if j.startswith('l') else 'R'
                             jname = j.split('_', 1)[1]
                             cv2.putText(bgr_image, '%s %s: %d' % (side, jname, pulses.get(j, 0)),

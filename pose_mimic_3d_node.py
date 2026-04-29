@@ -299,6 +299,9 @@ class PoseMimic3DNode:
         self._send_stand()
         time.sleep(1.0)
 
+        self.start_time = time.time()
+        self.start_delay = 8   # 8秒延迟
+
         # Gesture state
         self.gesture_count = 0
         self.no_gesture_count = 0
@@ -666,6 +669,16 @@ class PoseMimic3DNode:
         rate = rospy.Rate(10)
 
         while self.running:
+            # ===== 延迟启动 imitation =====
+            if time.time() - self.start_time < self.start_delay:
+                remaining = int(self.start_delay - (time.time() - self.start_time))
+                cv2.putText(bgr_image, f'STARTING IN {remaining}s', (10, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+    
+                self._send_stand()   # 保持站立
+                rate.sleep()
+                continue
+          
             if self.image is None:
                 rate.sleep()
                 continue

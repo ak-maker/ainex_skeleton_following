@@ -123,10 +123,22 @@ from ainex_interfaces.srv import SetWalkingCommand
 # Constants
 # ============================================================
 
+# the local model used for creating landmark points on each frame
 MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                           'model', 'pose_landmarker_lite.task')
 
-# Standing pulse values from stand.d6a
+# Standing pulse values from stand.d6a. 
+# I believe that this refers to the pose execution script found on the robot: the same values
+
+# in this case, we define the X, Y, Z axis as such:
+# X: right side to left side
+# Y: top side to the bottom side
+# Z: into/away from the robot
+
+# roll is rotation about the Z axis (like a screwdriver)
+# pitch is rotation about the X axis (like a up down nod)
+# yaw is rotation about the Y axis (like a side to side shake)
+
 STAND_PULSE = {
     'l_ank_roll':  500,  'r_ank_roll':  500,
     'l_ank_pitch': 640,  'r_ank_pitch': 360,
@@ -142,6 +154,8 @@ STAND_PULSE = {
     'head_pan':    500,  'head_tilt':   500,
 }
 
+# the id numbers that coorrespond to the names of each servo.
+# roll refers to s
 SERVO_ID = {
     'l_ank_roll': 1,   'r_ank_roll': 2,
     'l_ank_pitch': 3,  'r_ank_pitch': 4,
@@ -158,6 +172,9 @@ SERVO_ID = {
 }
 
 # All arm joints we control (10 servos, 5 per arm)
+
+# in this case, we focus on using these specific arm joints for imitation
+# i.e. using the head servo might be problematic for putting the person out of frame
 ARM_JOINTS = [
     'l_sho_pitch', 'r_sho_pitch',
     'l_sho_roll',  'r_sho_roll',
@@ -167,6 +184,9 @@ ARM_JOINTS = [
 ]
 
 # Leg joints we control (12 servos, 6 per leg)
+
+# we only use a limited number of the leg servos i believe, to keep the robot from tipping or falling over.
+
 LEG_JOINTS = [
     'l_hip_yaw',   'r_hip_yaw',
     'l_hip_roll',  'r_hip_roll',
@@ -179,36 +199,63 @@ LEG_JOINTS = [
 ALL_JOINTS = ARM_JOINTS + LEG_JOINTS
 
 # Units per degree (1000 units = 240 degrees)
+
+# AInex has its own measurements for rotations, which we map to degrees.
+# the reason we don't map to 360 degrees is because our servos cannot
+# safely rotate so far, as this would be dangerous
 UNITS_PER_DEG = 1000.0 / 240.0  # ≈ 4.17
 
+
+# we compute this 24 using 100 * (240/1000) = 24
 # Leg safety: max offset from stand (±100 units ≈ ±24 degrees)
 LEG_MAX_OFFSET = 100
 
 # --- Gesture ---
+# the number of consecutive frames before it sees it as a hands close gesture
 STAND_GESTURE_FRAMES = 5
+
+# the numebr of consectuvie frames before resuming, but unused in code
 RESUME_FRAMES = 12
+
+# the threshold for the ratio of wrist_dist/shoulder_width before it triggers
 CROSS_DIST_RATIO = 0.5
 
 # --- Anti-twitch ---
-WINDOW_SIZE = 15         # large window for heavy smoothing
-SEND_EVERY = 30          # send every 30 frames = ~3 seconds at 10Hz
-MIN_FRAMES_BEFORE_SEND = 10
-DEADZONE_PULSE = 50      # ignore changes smaller than 50 pulse units
+# window size defines how many frames of pulse values we store in a sliding buffer
+# "pulse" refers to the numerical angle values for all motors 0-1000.
+WINDOW_SIZE = 15         # large window for heavy smoothing. more frames means more resistance to micro gestures
+
+SEND_EVERY = 30          # send every 30 frames = ~3 seconds at 10Hz. Robot only moves every 3 seconds.
+MIN_FRAMES_BEFORE_SEND = 10 # ensures that we have a strong enough average
+DEADZONE_PULSE = 50      # ignore changes smaller than 50 pulse units (prevents tiny changes in robot)
 
 
+# i.e. linear interpolation to map values from servo angles to pulse values, vice versa
 def val_map(x, in_min, in_max, out_min, out_max):
     return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min
 
 
+# clamps x between the range lo, hi
 def clamp(x, lo, hi):
     return max(lo, min(hi, x))
 
 
+# Note: for some of the motors, we get the 3D angle between the 
+# multiple joints (unsigned), maybe because the direction is implicit
+
+# But for shoulder, we keep it simpler, with a 2D angle between 
+
+
+# gives unsigned angle between vectors
 def angle_between_vectors_3d(v1, v2):
+    # uses the formula: v1 · v2 = ‖v1‖ · ‖v2‖ · cos(θ)
+
     """Unsigned angle between two 3D vectors (degrees)."""
     d = np.linalg.norm(v1) * np.linalg.norm(v2)
     if d < 1e-9:
         return None
+    
+    # is for preventing against floating point errors, so that our angle is clean
     cos_val = np.clip(np.dot(v1, v2) / d, -1.0, 1.0)
     return float(np.degrees(np.arccos(cos_val)))
 
@@ -219,53 +266,104 @@ def signed_angle_2d(v1, v2):
     if d < 1e-9:
         return None
     cos_val = np.clip(np.dot(v1, v2) / d, -1.0, 1.0)
+
+    # ‖a × b‖ = ‖a‖ · ‖b‖ · sin(θ)
     sin_val = np.clip(np.cross(v1, v2) / d, -1.0, 1.0)
     return float(np.degrees(np.arctan2(sin_val, cos_val)))
 
-
+# I believe the paramters are each 3D vectors. 
+# We would need to call oncee for each forearm
 def _compute_forearm_rotation(wri, pinky, index, forearm_vec):
     """Compute forearm rotation angle from hand landmarks.
     Returns angle in degrees or None if landmarks are unreliable."""
+   
     to_pinky = pinky - wri
     to_index = index - wri
 
     # Palm normal via cross product
+    # cross product gives a normal vector
+
     palm_normal = np.cross(to_index, to_pinky)
+    # vector going out from palm
+
     norm_len = np.linalg.norm(palm_normal)
+
     if norm_len < 1e-6:
         return None
+    
+    #nromalized palm
     palm_normal = palm_normal / norm_len
 
     # Forearm direction (normalized)
     fa_len = np.linalg.norm(forearm_vec)
     if fa_len < 1e-6:
         return None
+    
+    # normalized forarm
     fa_dir = forearm_vec / fa_len
 
     # Project palm normal onto plane perpendicular to forearm
+
+
+    # projecting onto the palm normal onto the forearm, using projection formula
+    # then, subtract away the projection to leave theh 
+    # palm_normal = [part along forearm] + [part perpendicular to forearm]
+
+    # this is all necessary because the wrist allows for vector components 
+    # that are not part of the projection onto the forearm
+
     palm_perp = palm_normal - np.dot(palm_normal, fa_dir) * fa_dir
     perp_len = np.linalg.norm(palm_perp)
     if perp_len < 1e-6:
         return None
     palm_perp = palm_perp / perp_len
 
+
+
+    # this line makes the assumption that the arms are roughly aligned with the x-axis
+    # Ask Jiewen about this assumtpion
+
+    # so in a sense we then project it onto the Y, Z plane, 
+    # disregarding our X value (essentially assuming that all 
+    # forearm rotations are with an arm along the x -axis)
+
+    # Then, we use atan2, which returns the angle above the x-axis
+    #  that we get between the x-axis and our vector (Y,Z)
+
+  
     # Compute rotation angle using Y and Z components of projected vector
     rotation_angle = math.degrees(math.atan2(palm_perp[2], palm_perp[1]))
     return rotation_angle
 
+
+
+# This is a ROS Node (runtime process) for mimicking the pose
+
+# In this case, AiNex already has a walking module node, camera node, and other 
+# features instead of rewriting these, this node acts as a 
+
+
+# ROS's role is specifically: subscribing to the camera image topic, 
+# calling a service to disable the walking module first (to avoid servo conflicts),
+# and publishing the annotated result image (so that the web server can access it)
 
 class PoseMimic3DNode:
     def __init__(self, name):
         rospy.init_node(name, anonymous=False)
         self.name = name
         self.running = True
+
+        # aka latest image
         self.image = None
         self.fps = fps.FPS()
         self.frame_ts = 0  # timestamp counter for VIDEO mode
 
+        # sigint is "signal interrupt"— handles the shutdown of processes / ROS
         signal.signal(signal.SIGINT, self.shutdown)
 
         # ---- MediaPipe PoseLandmarker (new Tasks API, VIDEO mode) ----
+
+        # set up the model
         base_options = mp_python.BaseOptions(model_asset_path=MODEL_PATH)
         self.detector = mp_vision.PoseLandmarker.create_from_options(
             mp_vision.PoseLandmarkerOptions(
@@ -280,12 +378,20 @@ class PoseMimic3DNode:
         self.mp_drawing = mp.solutions.drawing_utils
 
         # ---- Servo control ----
+        # class provided by ainex to control 
         self.motion_manager = MotionManager()
+
+        # 
         self.last_pulse = {}
+
+        # the window for averaging the poses
         self.pulse_window = deque(maxlen=WINDOW_SIZE)
+
+        # keeps track of frames for deciding when to take next photo
         self.frame_count = 0
 
-        # Stop walking module
+        # Stop walking module. Needed to communicate with other servo nodes in the AiNex to prevent both
+        # trying to publish to servos at the saem time.
         try:
             rospy.wait_for_service('walking/command', timeout=5)
             walk_cmd = rospy.ServiceProxy('walking/command', SetWalkingCommand)
@@ -304,28 +410,36 @@ class PoseMimic3DNode:
 
         # Gesture state
         self.gesture_count = 0
+        # number of times that it doesn't count a gesture in the cycle?
         self.no_gesture_count = 0
         self.in_stand_mode = False
 
         # ---- ROS ----
+        # subscribes to camera. the callback is the funcition that gets called on the latest publish
         self.camera = rospy.get_param('/camera')
         rospy.Subscriber(
             '/{}/{}'.format(self.camera['camera_name'], self.camera['image_topic']),
             Image, self.image_callback,
         )
+        # annotated image gets upublished here for livestream
         self.result_pub = rospy.Publisher('~image_result', Image, queue_size=1)
 
         rospy.loginfo('[PoseMimic3D] Ready! New Tasks API, VIDEO mode, world coords')
 
+    
+    # shuts down, ending run loop 
     def shutdown(self, signum, frame):
         self.running = False
 
+    # save the latest image whenever we have a publish, this is funciton that is called
+    # after each publish, inputting the ros_image
     def image_callback(self, ros_image):
         self.image = np.ndarray(
             shape=(ros_image.height, ros_image.width, 3),
             dtype=np.uint8, buffer=ros_image.data,
         )
 
+    # set it to stand
     def _send_stand(self):
         cmds = [[SERVO_ID[j], STAND_PULSE[j]] for j in SERVO_ID]
         self.motion_manager.set_servos_position(1600, cmds)
@@ -340,20 +454,32 @@ class PoseMimic3DNode:
         """Check if hands are close together (wrist distance / shoulder width < threshold).
         Used for both stand and resume — easier to trigger than crossed arms
         since MediaPipe is too shaky for reliable cross detection."""
+        
+        # gets the normal vectors associated with the PoseLandmarker model response
         l_sho = norm_lm[11]
         r_sho = norm_lm[12]
         l_wri = norm_lm[15]
         r_wri = norm_lm[16]
 
+
+        # distance between shoulder points
         sho_w = math.sqrt((l_sho.x - r_sho.x)**2 + (l_sho.y - r_sho.y)**2)
+
+        # distance between wrists
         wri_d = math.sqrt((l_wri.x - r_wri.x)**2 + (l_wri.y - r_wri.y)**2)
 
+
+        # this guards against faulty readings with small shoulders
         if sho_w < 0.02:
             return False
 
+        # here, we have a our ratio rule, where it must be less than 
         ratio = wri_d / sho_w
-        close = ratio < CROSS_DIST_RATIO  # 0.8
+        close = ratio < CROSS_DIST_RATIO  # 0.5
 
+
+        
+        # conditionally prints the hands ratio
         if int(time.time()) != getattr(self, '_cross_dbg_t', 0):
             self._cross_dbg_t = int(time.time())
             print('[Hands] ratio=%.2f close=%s' % (ratio, close), flush=True)
@@ -364,6 +490,9 @@ class PoseMimic3DNode:
     # ------------------------------------------------------------------
     def compute_all_arm_pulses(self, world_lm, norm_lm, width, height):
         """Compute pulses using:
+
+        # proven lateral raise is said to be proven reliable in 2D
+
         - Screen (normalized) coords for sho_roll (lateral raise — proven reliable in 2D)
         - World coords for sho_pitch (forward/backward — needs Z) and elbow
 
@@ -669,7 +798,7 @@ class PoseMimic3DNode:
         rate = rospy.Rate(10)
 
         while self.running:
-            # ===== 延迟启动 imitation =====
+            # ===== 延迟启动 Delayed Start imitation =====
             if time.time() - self.start_time < self.start_delay:
                 remaining = int(self.start_delay - (time.time() - self.start_time))
                 cv2.putText(bgr_image, f'STARTING IN {remaining}s', (10, 30),

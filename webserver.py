@@ -93,13 +93,17 @@ def naive_average_skeleton(frames):
 
 # ── Frame validation ──────────────────────────────────────────────────────────
 
+REQUIRED_LANDMARKS = {11, 12, 13, 14, 15, 16}  # shoulders, elbows, wrists
+
 def is_valid_frame(landmarks):
-    """Reject frame if any landmark is below either confidence threshold."""
+    """Reject frame if any core landmark is below either confidence threshold."""
     if not landmarks:
         return False
     return all(
-        lm['presence'] >= PRESENCE_THRESHOLD and lm['visibility'] >= VISIBILITY_THRESHOLD
-        for lm in landmarks
+        landmarks[i]['presence'] >= PRESENCE_THRESHOLD and
+        landmarks[i]['visibility'] >= VISIBILITY_THRESHOLD
+        for i in REQUIRED_LANDMARKS
+        if i < len(landmarks)
     )
 
 
@@ -119,6 +123,10 @@ class StateManager:
         self.skeleton    = None        # list of {x,y,z} or None
         # Latest annotated frame for MJPEG feed
         self.latest_bgr  = None
+        # Logging counters
+        self._lm_count   = 0
+        self._img_count  = 0
+        self._last_log   = time.time()
 
     # ── Called from ROS subscriber thread ────────────────────────────────────
 
@@ -150,6 +158,17 @@ class StateManager:
                 self.skeleton = naive_average_skeleton(self.buffer)
                 self.status   = 'detected'
 
+            self._lm_count += 1
+            now = time.time()
+            if now - self._last_log >= 1.0:
+                print('[WebServer] landmarks %d/s  images %d/s  mode=%s  buffer=%d  status=%s' % (
+                    self._lm_count, self._img_count,
+                    self.mode, len(self.buffer), self.status,
+                ), flush=True)
+                self._lm_count  = 0
+                self._img_count = 0
+                self._last_log  = now
+
     def on_image(self, ros_image):
         frame = np.ndarray(
             (ros_image.height, ros_image.width, 3),
@@ -161,6 +180,7 @@ class StateManager:
             frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
         with self.lock:
             self.latest_bgr = frame
+            self._img_count += 1
 
     # ── Called from Flask threads ─────────────────────────────────────────────
 
@@ -214,7 +234,7 @@ header h1{font-size:16px;color:#aaa;letter-spacing:.05em}
 .result-pane{width:340px;flex-shrink:0}
 .pane-title{font-size:11px;color:#555;text-transform:uppercase;letter-spacing:.1em;margin-bottom:8px}
 img#feed{width:100%;border-radius:3px;background:#000;display:block}
-canvas#skel{width:100%;height:300px;background:#0a0a0a;border-radius:3px;display:block}
+canvas#skel{width:100%;background:#0a0a0a;border-radius:3px;display:block}
 .spinner{display:flex;align-items:center;justify-content:center;height:150px;
          gap:6px;color:#555;font-size:13px}
 .dot{width:7px;height:7px;border-radius:50%;background:#333;
@@ -276,7 +296,7 @@ function ensureCanvas() {
 
 function drawSkeleton(skel) {
   ensureCanvas();
-  const W = canvas.offsetWidth || 320, H = 300;
+  const W = canvas.offsetWidth || 320, H = Math.round(W * 1.5);
   canvas.width = W; canvas.height = H;
   ctx.fillStyle = '#0a0a0a';
   ctx.fillRect(0, 0, W, H);
@@ -435,10 +455,24 @@ def ros_main():
 
 if __name__ == '__main__':
     import sys
+    import argparse
     sys.stdout = open(sys.stdout.fileno(), mode='w', buffering=1)
 
-    ros_thread = threading.Thread(target=ros_main, daemon=True)
-    ros_thread.start()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--port', type=int, default=WEB_PORT)
+    args = parser.parse_args()
 
-    print('[WebServer] http://0.0.0.0:%d' % WEB_PORT, flush=True)
-    app.run(host='0.0.0.0', port=WEB_PORT, threaded=True, use_reloader=False)
+    def run_flask():
+        try:
+            app.run(host='0.0.0.0', port=args.port, threaded=True, use_reloader=False)
+        except OSError as e:
+            print('[WebServer] ERROR: %s' % e, flush=True)
+            print('[WebServer] usage: python3 webserver.py [--port PORT]', flush=True)
+            import os; os._exit(1)
+
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    print('[WebServer] http://0.0.0.0:%d' % args.port, flush=True)
+
+    ros_main()  # owns the main thread and its signal handlers
+

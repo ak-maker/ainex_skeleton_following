@@ -13,14 +13,15 @@ from sensor_msgs.msg import Image
 from std_msgs.msg import String
 from ainex_sdk.common import cv2_image2ros
 
-MODEL_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    '../../model', 'pose_landmarker_lite.task'
-)
+# not accurate here, but works on pi
+MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          'model', 'pose_landmarker_lite.task')
+
 
 
 class PosePublisher:
     def __init__(self):
+        
         rospy.init_node('pose_publisher', anonymous=False)
 
         # IMAGE mode: no temporal smoothing — each frame is independent,
@@ -46,6 +47,10 @@ class PosePublisher:
             '/{}/{}'.format(camera['camera_name'], camera['image_topic']),
             Image, self._image_cb,
         )
+    
+        # annotated image gets upublished here for livestream
+        self.result_pub = rospy.Publisher('~image_result', Image, queue_size=1)
+
 
         self.annotated_pub = rospy.Publisher(
             '/stable_gest/image_annotated', Image, queue_size=1
@@ -72,6 +77,9 @@ class PosePublisher:
 
     def run(self):
         rate = rospy.Rate(15)
+        self._frame_count = 0
+        self._last_log = time.time()
+
         while self.running and not rospy.is_shutdown():
             if self.latest_image is None:
                 rate.sleep()
@@ -92,7 +100,8 @@ class PosePublisher:
                 'world_landmarks': [],
             }
 
-            if result.pose_landmarks and result.pose_world_landmarks:
+            detected = result.pose_landmarks and result.pose_world_landmarks
+            if detected:
                 norm_lm = result.pose_landmarks[0]
                 world_lm = result.pose_world_landmarks[0]
 
@@ -122,6 +131,15 @@ class PosePublisher:
             self.annotated_pub.publish(
                 cv2_image2ros(cv2.resize(bgr, (640, 480)), 'pose_publisher')
             )
+            self._frame_count += 1
+
+            now = time.time()
+            if now - self._last_log >= 1.0:
+                status = 'person detected' if detected else 'no person'
+                print('[PosePublisher] %d fps — %s' % (self._frame_count, status), flush=True)
+                self._frame_count = 0
+                self._last_log = now
+
             rate.sleep()
 
         self.detector.close()

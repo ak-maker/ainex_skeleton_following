@@ -16,6 +16,8 @@ from ainex_sdk.common import cv2_image2ros
 from ainex_kinematics.motion_manager import MotionManager
 from ainex_interfaces.srv import SetWalkingCommand
 
+from datetime import datetime
+
 
 STAND_PULSE = {
     'l_ank_roll':  500,  'r_ank_roll':  500,
@@ -32,6 +34,35 @@ STAND_PULSE = {
     'head_pan':    500,  'head_tilt':   500,
 }
 
+STAND_LOW_PULSE = {
+    'l_ank_roll':  500,  'r_ank_roll':  500,
+    'l_ank_pitch': 720,  'r_ank_pitch': 280,
+    'l_knee':      650,  'r_knee':      350,
+    'l_hip_pitch': 245,  'r_hip_pitch': 755,
+    'l_hip_roll':  500,  'r_hip_roll':  500,
+    'l_hip_yaw':   500,  'r_hip_yaw':   500,
+    'l_sho_pitch': 835,  'r_sho_pitch': 165,
+    'l_sho_roll':  830,  'r_sho_roll':  170, # changed l_sho_roll
+    'l_el_pitch':  500,  'r_el_pitch':  500,
+    'l_el_yaw':    70,  'r_el_yaw':     930,
+    'l_gripper':   500,  'r_gripper':   500,
+    'head_pan':    500,  'head_tilt':   500,
+}
+
+DAB_PULSE = {
+    'l_ank_roll':  500,  'r_ank_roll':  500, #1/2
+    'l_ank_pitch': 720,  'r_ank_pitch': 280, #3/4
+    'l_knee':      650,  'r_knee':      350, #5/6
+    'l_hip_pitch': 240,  'r_hip_pitch': 755, #7/8
+    'l_hip_roll':  500,  'r_hip_roll':  500, #9/10
+    'l_hip_yaw':   500,  'r_hip_yaw':   500, #11/12
+    'l_sho_pitch': 835,  'r_sho_pitch': 675, #13/14
+    'l_sho_roll':  585,  'r_sho_roll':  225, #15/16
+    'l_el_pitch':  500,  'r_el_pitch':  120, #17/18
+    'l_el_yaw':    465,  'r_el_yaw':    890, #19/20
+    'l_gripper':   500,  'r_gripper':   500, #21/22
+    'head_pan':    500,  'head_tilt':   500, #23/24
+}
 # the id numbers that coorrespond to the names of each servo.
 # roll refers to s
 SERVO_ID = {
@@ -82,7 +113,9 @@ ALL_JOINTS = ARM_JOINTS + LEG_JOINTS
 
 class DemoPose():
     def __init__(self, name):
-        self.name = name
+
+        rospy.init_node(name, anonymous=False)
+
         self.motion_manager = MotionManager()
 
         try:
@@ -95,23 +128,28 @@ class DemoPose():
         except Exception as e:
             rospy.logwarn('[PoseMimic3D] cannot connect walking service: %s' % str(e))
 
-        self._send_stand()
-        time.sleep(1.0)
 
-        
-        # ---- ROS ----
-        self.camera = rospy.get_param('/camera')
-        rospy.Subscriber(
-            '/{}/{}'.format(self.camera['camera_name'], self.camera['image_topic']),
-            Image, self.image_callback,
-        )
-        self.result_pub = rospy.Publisher('~image_result', Image, queue_size=1)
+    def _execute_cmd(self, pulse):
+        cmds = []
+        for servo in SERVO_ID:
+            cmds.append([SERVO_ID[servo], pulse[servo]])
 
-        rospy.loginfo('[PoseMimic3D] Ready! New Tasks API, VIDEO mode, world coords')
+            # motion manager is 1600 ms to complete the movement
+        self.motion_manager.set_servos_position(1600, cmds)
+        rospy.loginfo('[PoseMimic3D] stood'+str(datetime.now()))
 
 
-    def _stand():
-        return
+    def run(self):
+        self._execute_cmd(STAND_LOW_PULSE)
+        time.sleep(2.0)
+        self._execute_cmd(STAND_PULSE)
+        time.sleep(2.0)
+        self._execute_cmd(STAND_LOW_PULSE)
+        time.sleep(2.0)
+        self._execute_cmd(STAND_PULSE)
+        time.sleep(2.0)
+        self._execute_cmd(DAB_PULSE)
+
     
 if __name__ == "__main__":
     import sys

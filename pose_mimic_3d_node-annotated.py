@@ -449,7 +449,9 @@ class PoseMimic3DNode:
 
     # ------------------------------------------------------------------
     # Gesture: crossed arms (using normalized screen landmarks)
-    # ------------------------------------------------------------------
+    # -----------------------------------------------------------------
+    
+    # given landmarks, detects if hands are crossed using the wrist distance based on shoulder width metric
     def _hands_close(self, norm_lm):
         """Check if hands are close together (wrist distance / shoulder width < threshold).
         Used for both stand and resume — easier to trigger than crossed arms
@@ -485,6 +487,9 @@ class PoseMimic3DNode:
             print('[Hands] ratio=%.2f close=%s' % (ratio, close), flush=True)
         return close
 
+
+    # THIS is where the heavy lifting happens (most of the linear algebra)
+    # 
     # ------------------------------------------------------------------
     # 3D angle extraction using world coordinates
     # ------------------------------------------------------------------
@@ -500,6 +505,9 @@ class PoseMimic3DNode:
 
         # ============================================================
         # sho_roll (ID 15/16): lateral arm raise — EXACT SAME as working 2D node
+
+
+        # THINK like shoulder lateral raise at the gym
         # ============================================================
         # Use screen pixel coords with vector_2d_angle from horizontal reference
         # Sign-mirrored ranges: L(-100,90)→(70,900), R(-90,100)→(100,930)
@@ -512,6 +520,8 @@ class PoseMimic3DNode:
         l_ref = [width, l_sho_px[1]]
         r_ref = [0, r_sho_px[1]]
 
+
+        # computres the angle between (the line of the shoulder and the elbow) and the (line of the shoulder and the hip)
         a_l_roll = signed_angle_2d(
             np.array(l_sho_px) - np.array(l_ref),
             np.array(l_sho_px) - np.array(l_elb_px))
@@ -524,11 +534,16 @@ class PoseMimic3DNode:
 
         # Sign-mirrored clamp: left gets extra negative range, right gets extra positive
         # (same physical movement = opposite sign due to mirrored reference points)
+
+        # We clamp the lateral roll between a safe range
         a_l_roll = clamp(a_l_roll, -100, 90)
         a_r_roll = clamp(a_r_roll, -90, 100)
 
+        # we need to map this to the correct servo motor, using our value map function (linear interpolation)
         p_l_sho_roll = int(clamp(val_map(a_l_roll, -100, 90, 70, 900), 70, 900))
         p_r_sho_roll = int(clamp(val_map(a_r_roll, -90, 100, 100, 930), 100, 930))
+
+
 
         # Extract world landmarks for pitch and elbow
         l_sho = np.array([world_lm[11].x, world_lm[11].y, world_lm[11].z])
@@ -543,6 +558,11 @@ class PoseMimic3DNode:
 
         # ============================================================
         # sho_pitch (ID 13/14): forward/backward arm swing
+
+
+        # THINK like forward frontal raise at the gym
+        # It is the servo that connects the arm to the body
+
         # ============================================================
         # Compute pitch angle in YZ plane using atan2
         # MediaPipe world coords: Y=down(+), Z=away from camera(+)
@@ -558,6 +578,15 @@ class PoseMimic3DNode:
         #
         # Servo 13 (left): big=back, small=forward
         # Servo 14 (right): small=back, big=forward (mirror mount)
+
+
+
+
+
+        # l_upper[1] is how far the elbow is below the shoulder
+        # l_upper[2] is how far back the elbow is
+
+        # so that ^ angle tells how the shoulder rotates (front/back)
         l_pitch_angle = math.degrees(math.atan2(-l_upper[2], l_upper[1]))
         r_pitch_angle = math.degrees(math.atan2(-r_upper[2], r_upper[1]))
 
@@ -597,6 +626,12 @@ class PoseMimic3DNode:
 
         l_rot_angle = _compute_forearm_rotation(l_wri_w, l_pinky_w, l_index_w, l_forearm)
         r_rot_angle = _compute_forearm_rotation(r_wri_w, r_pinky_w, r_index_w, r_forearm)
+        
+        # these will be None when the some value indicating the noisy
+
+        # this compute forearm was complex, but remember find the normal coming out
+        # of the palm, then project it onto the forearm for the wrist motion
+
 
         # Servo 17 (left): 875 = palm forward, 125 = palm backward (swapped — was crossed)
         if l_rot_angle is not None:
@@ -620,6 +655,9 @@ class PoseMimic3DNode:
         # Servo 19: 值越小→弯曲, 600≈伸直, 物理范围50-600
         # Servo 20: 值越大→弯曲, 450≈伸直, 物理范围400-950
         #   *** Servo 20 CANNOT go below 360 (burned before). Clamp min = 400 for safety. ***
+        
+
+        # basic getting the angle
         a_l_elb = angle_between_vectors_3d(-l_upper, l_forearm)
         a_r_elb = angle_between_vectors_3d(-r_upper, r_forearm)
 
@@ -674,8 +712,13 @@ class PoseMimic3DNode:
         Servo ranges (user-tested):
           Servo 9  (l_hip_roll): 400-600, 400=outward 30°, 600=inward 20°
           Servo 10 (r_hip_roll): 400-600, 400=inward 20°, 600=outward 30°
+
+            # 9/10 are roll
+
           Servo 11 (l_hip_yaw):  300-600, 300=outward 45°, 600=inward 20°
           Servo 12 (r_hip_yaw):  400-700, 400=inward 20°, 700=outward 45°
+
+            # 11/12 is yaw
 
         Returns dict of {joint_name: pulse}."""
 

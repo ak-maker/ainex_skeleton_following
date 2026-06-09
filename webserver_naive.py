@@ -155,7 +155,7 @@ class StateManager:
             # ── Frame ingestion (only during TRACKING) ───────────────────────
             if self.mode == 'TRACKING' and is_valid_frame(norm_lm):
                 self.buffer.append(norm_lm)
-                self.skeleton = self.buffer[most_stable_frame(self.buffer)]
+                self.skeleton = naive_average_skeleton(self.buffer)
                 self.status   = 'detected'
 
             self._lm_count += 1

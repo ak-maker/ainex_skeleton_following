@@ -1,0 +1,7 @@
+torch
+torchvision
+Pillow
+pillow-heif
+imagehash
+scikit-learn
+opencv-python

@@ -1,0 +1,35 @@
+# ── macOS / OS junk ───────────────────────────────────────────────────────
+.DS_Store
+**/.DS_Store
+Thumbs.db
+
+# ── Python ────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# ── Virtual environments ──────────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+
+# ── Editors / IDEs ────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*~
+
+# ── Datasets (training/val images) ────────────────────────────────────────
+/data
+
+# ── Trained model weights (large; regenerate via training) ────────────────
+# The mediapipe task file (model/pose_landmarker_lite.task) is committed; the
+# trained classifier checkpoint is not. Force-add with `git add -f` if needed.
+*.pt
+*.pth
+*.ckpt

@@ -10,8 +10,11 @@ from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision as mp_vision
 from mediapipe.framework.formats import landmark_pb2
 from sensor_msgs.msg import Image
-from std_msgs.msg import String
+from std_msgs.msg import String, Bool
 from ainex_sdk.common import cv2_image2ros
+
+# Topic the webserver broadcasts on to stop every node.
+SHUTDOWN_TOPIC = '/system/shutdown'
 
 # not accurate here, but works on pi
 MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -55,11 +58,23 @@ class PosePublisher:
         self.annotated_pub = rospy.Publisher(
             '/stable_gest/image_annotated', Image, queue_size=1
         )
+        # clean (un-annotated) frame — used by the web server for classification
+        self.clean_pub = rospy.Publisher(
+            '/stable_gest/image_clean', Image, queue_size=1
+        )
         self.landmarks_pub = rospy.Publisher(
             '/stable_gest/landmarks', String, queue_size=10
         )
 
+        rospy.Subscriber(SHUTDOWN_TOPIC, Bool, self._shutdown_cb)
+
         rospy.loginfo('[PosePublisher] ready — publishing to /stable_gest/')
+
+    def _shutdown_cb(self, msg):
+        if msg.data:
+            rospy.logwarn('[PosePublisher] kill received — shutting down')
+            self.running = False
+            rospy.signal_shutdown('kill command received')
 
     def _image_cb(self, ros_image):
         self.latest_image = np.ndarray(
@@ -93,6 +108,7 @@ class PosePublisher:
             result = self.detector.detect(mp_img)
 
             bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            clean_bgr = bgr.copy()   # snapshot before any landmark/text drawing
 
             payload = {
                 'timestamp': time.time(),
@@ -130,6 +146,9 @@ class PosePublisher:
             self.landmarks_pub.publish(String(data=json.dumps(payload)))
             self.annotated_pub.publish(
                 cv2_image2ros(cv2.resize(bgr, (640, 480)), 'pose_publisher')
+            )
+            self.clean_pub.publish(
+                cv2_image2ros(cv2.resize(clean_bgr, (640, 480)), 'pose_publisher')
             )
             self._frame_count += 1
 

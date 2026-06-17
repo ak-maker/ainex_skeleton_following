@@ -30,6 +30,5 @@ ENV/
 # ── Trained model weights (large; regenerate via training) ────────────────
 # The mediapipe task file (model/pose_landmarker_lite.task) is committed; the
 # trained classifier checkpoint is not. Force-add with `git add -f` if needed.
-*.pt
 *.pth
 *.ckpt

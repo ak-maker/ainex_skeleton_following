@@ -30,7 +30,7 @@ EMPTY_SERVOS = {'head_pan', 'head_tilt'}
 def pulse_to_servos(pulse):
     """Convert a {servo_name: pulse} dict into [[servo_id, pulse], ...].
 
-    Used to turn the *_PULSE pose dicts in pulses.py into the format
+    Used to turn the *_PULSE pose dicts in config.py into the format
     MotionManager.set_servos_position expects. Head servos (and any None
     values) are skipped — the head is driven separately by head.py.
     """

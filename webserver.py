@@ -39,14 +39,16 @@ import torch.nn as nn
 from torchvision import models, transforms
 from PIL import Image as PILImage
 
+from config import TRACKING_DURATION, RESULTS_DURATION
+
 WEB_PORT = 8080
 
 # Topic every node listens on; publishing True tells them all to stop.
 SHUTDOWN_TOPIC = '/system/shutdown'
 
 # ── Cycle / stability parameters (gaussian skeleton) ──────────────────────────
-TRACKING_DURATION = 5.0    # seconds per classification cycle
-RESULTS_DURATION = 3.0
+# TRACKING_DURATION / RESULTS_DURATION are imported from config (shared with the
+# body node so it can't pull the classifier in just to read a constant).
 STABILITY_N       = 3      # Gaussian neighbour half-window for stability scoring
 STABILITY_SIGMA   = 1.0    # Gaussian σ for stability scoring
 REQUIRED_LANDMARKS = {11, 12, 13, 14, 15, 16}  # shoulders, elbows, wrists

@@ -18,7 +18,7 @@ from ainex_interfaces.srv import SetWalkingCommand
 
 from datetime import datetime
 
-from pulses import *
+from config import *
 
 # the id numbers that coorrespond to the names of each servo.
 # roll refers to s

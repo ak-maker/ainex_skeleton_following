@@ -7,7 +7,7 @@ classification cycle) and drives the body/arm servos into a hard-coded pose for
 whichever of the 7 classes was detected.
 
 The per-class servo targets are derived from the *_PULSE pose dicts in
-pulses.py, converted into [[servo_id, position], ...] lists via
+config.py, converted into [[servo_id, position], ...] lists via
 d6a_converter.pulse_to_servos (head servos are dropped — head.py drives those).
 
 Subscribes: /body_commands
@@ -19,12 +19,9 @@ import time
 import rospy
 from std_msgs.msg import String, Bool
 from ainex_kinematics.motion_manager import MotionManager
-from webserver import RESULTS_DURATION
 
-# Topic the webserver broadcasts on to stop every node.
-SHUTDOWN_TOPIC = '/system/shutdown'
-
-from pulses import (
+from config import (
+    RESULTS_DURATION,
     T_POSE_PULSE,
     DAB_PULSE,
     SUPERHERO_PULSE,
@@ -32,8 +29,11 @@ from pulses import (
     MUSCLES_PULSE,
     HANDS_UP_PULSE,
     WARRIOR_PULSE,
-    STAND_PULSE
+    STAND_PULSE,
 )
+
+# Topic the webserver broadcasts on to stop every node.
+SHUTDOWN_TOPIC = '/system/shutdown'
 
 # the id numbers that coorrespond to the names of each servo.
 # roll refers to s
@@ -61,7 +61,7 @@ EMPTY_SERVOS = {'head_pan', 'head_tilt'}
 def pulse_to_servos(pulse):
     """Convert a {servo_name: pulse} dict into [[servo_id, pulse], ...].
 
-    Used to turn the *_PULSE pose dicts in pulses.py into the format
+    Used to turn the *_PULSE pose dicts in config.py into the format
     MotionManager.set_servos_position expects. Head servos (and any None
     values) are skipped — the head is driven separately by head.py.
     """
@@ -76,7 +76,7 @@ def pulse_to_servos(pulse):
 # ── Tunable parameters ────────────────────────────────────────────────────────
 MOVE_DURATION = 800    # ms passed to set_servos_position for body moves
 
-# Per-class servo targets, built from the pulse poses in pulses.py.
+# Per-class servo targets, built from the pulse poses in config.py.
 # Each value is a list of [servo_id, position] pairs.
 POSES = {
     't-pose':      pulse_to_servos(T_POSE_PULSE),

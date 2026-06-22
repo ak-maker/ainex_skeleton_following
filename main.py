@@ -11,6 +11,7 @@ from torch.utils.data import DataLoader, Dataset
 from torchvision import models, transforms
 from PIL import Image
 from pathlib import Path
+from datetime import datetime
 import pillow_heif
 pillow_heif.register_heif_opener()
 from sklearn.metrics import confusion_matrix
@@ -257,9 +258,16 @@ def main():
     train_phase('Phase 2 — full fine-tune', model, train_dl, val_dl,
                 P2_EPOCHS, P2_LR, P2_WD, device)
 
-    # save our model
-    torch.save({'classes': classes, 'state_dict': model.state_dict()}, 'model.pt')
-    print('\nsaved model.pt')
+    # save our model under a full-ISO-timestamped filename, never overwriting an existing one
+    # (colons are replaced with dashes so the name is filesystem-safe)
+    stamp = datetime.now().isoformat(timespec='seconds').replace(':', '-')
+    out_path = Path(f'{stamp}-pose.pt')
+    counter = 2
+    while out_path.exists():
+        out_path = Path(f'{stamp}-pose_{counter}.pt')
+        counter += 1
+    torch.save({'classes': classes, 'state_dict': model.state_dict()}, out_path)
+    print(f'\nsaved {out_path}')
 
     print_confusion_matrix(model, val_dl, classes, device)
 
